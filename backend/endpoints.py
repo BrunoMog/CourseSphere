@@ -43,6 +43,7 @@ logger.setLevel(logging.INFO)
 # Flask Application Setup
 # ---------------------------------------------------------
 app = Flask(__name__)
+INSTANCE_ID = os.environ.get("INSTANCE_ID", "backend-standalone")
 
 # Security Hardening: Restrict CORS origins instead of wildcard '*'
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000").split(",")
@@ -82,6 +83,7 @@ def after_request(response):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';"
     response.headers["X-Request-ID"] = getattr(g, "request_id", "")
+    response.headers["X-Served-By"] = INSTANCE_ID
 
     # Structured JSON access log
     logger.info(
@@ -121,6 +123,7 @@ def health_check():
     code = 200 if status == "UP" else 503
     return jsonify({
         "status": status,
+        "instance_id": INSTANCE_ID,
         "database": db_status,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     }), code
