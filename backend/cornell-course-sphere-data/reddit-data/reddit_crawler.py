@@ -20,13 +20,29 @@ class RedditCrawler:
 
         :param api_keys_path: Path to the JSON file containing Reddit API credentials.
         """
-        current_dir = os.path.dirname(os.path.realpath(__file__))
-        api_keys = json.loads(open(os.path.join(current_dir, api_keys_path)).read())
-        self.reddit = praw.Reddit(
-            client_id=api_keys["client_id"],
-            client_secret=api_keys["client_secret"],
-            user_agent="jji-bigg"
-        )
+        client_id = os.environ.get("REDDIT_CLIENT_ID")
+        client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
+        if not (client_id and client_secret):
+            current_dir = os.path.dirname(os.path.realpath(__file__))
+            full_path = os.path.join(current_dir, api_keys_path)
+            if os.path.exists(full_path):
+                try:
+                    with open(full_path, "r") as f:
+                        api_keys = json.loads(f.read())
+                        client_id = api_keys.get("client_id")
+                        client_secret = api_keys.get("client_secret")
+                except Exception as e:
+                    logging.warning(f"Could not load Reddit keys from file: {e}")
+
+        if not (client_id and client_secret):
+            logging.warning("Reddit API credentials not provided. Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET.")
+            self.reddit = None
+        else:
+            self.reddit = praw.Reddit(
+                client_id=client_id,
+                client_secret=client_secret,
+                user_agent="coursesphere-crawler"
+            )
         self.subreddit = None
         self.search = None
         self.search_term = None
