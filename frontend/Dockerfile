@@ -9,7 +9,7 @@ WORKDIR /app
 # Copy dependency manifests
 COPY package*.json ./
 
-# Install dependencies (ignoring optional post-install scripts for security)
+# Install dependencies
 RUN npm install
 
 # Copy source code and build Vite static bundle
@@ -17,7 +17,7 @@ COPY . .
 RUN npm run build
 
 # ---------------------------------------------------------
-# Stage 2: Production Nginx Static Server
+# Stage 2: Production Nginx Static Server (Non-Root)
 # ---------------------------------------------------------
 FROM nginx:alpine-slim
 
@@ -26,6 +26,13 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy compiled static assets from builder stage
 COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Configure permissions for non-root nginx user (AppSec CWE-250 fix)
+RUN chown -R nginx:nginx /usr/share/nginx/html /var/cache/nginx /var/log/nginx /etc/nginx/conf.d && \
+    touch /var/run/nginx.pid && \
+    chown -R nginx:nginx /var/run/nginx.pid
+
+USER nginx
 
 EXPOSE 80
 
