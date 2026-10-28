@@ -54,10 +54,13 @@ A avaliação combinou análise estática automatizada (**SAST** com Bandit e Se
 | **Aplicação Web Frontend** | `frontend/src/api.ts`, `pages/*`, `components/*`, `package.json` | React 18 + TypeScript + Vite + Material UI |
 | **Infraestrutura e Containers** | `backend/Dockerfile`, `frontend/Dockerfile`, `docker-compose.yml`, `docker/nginx/nginx.conf`, `k8s/manifests.yaml` | Docker + Nginx + Prometheus + Grafana + Kubernetes |
 
-### 3.2 Perfis de Acesso Testados
-- **Não Autenticado (Anonymous/Unauthenticated)**: Atacante externo sem credenciais válidas.
-- **Usuário Autenticado Padrão (User A — `alice`)**: Estudante/criador autenticado com token Bearer válido.
-- **Usuário Autenticado Secundário (User B — `bob`)**: Atacante autenticado tentando acessar ou modificar recursos (cursos e chats) pertencentes ao Usuário A (testes de autorização horizontal / BOLA / IDOR).
+### 3.2 Perfis de Acesso Testados (Authenticated Roles Tested)
+
+| Perfil / Role | Credencial / Identificador de Teste | Nível de Privilégio | Escopo de Validação na Auditoria |
+|---|---|---|---|
+| **Não Autenticado (`Anonymous / Unauthenticated`)** | Sem cabeçalho `Authorization` ou com token inválido/expirado | Nenhum (Público) | Tentativas de acesso não autorizado a `/users/query`, `/courses` (`POST/PUT/DELETE`), `/chats/*`, injeção de SQL em rotas públicas e força bruta em `/users/login`. |
+| **Usuário Autenticado Proprietário (`Resource Owner — alice`)** | `Bearer valid_token_alice` (`uid: user_alice`) | Usuário Padrão (Criador do Recurso) | Criação legítima de cursos (`POST /courses`), edição (`PUT /courses/<id>`) e exclusão (`DELETE /courses/<id>`) dos próprios cursos e acesso ao próprio histórico de chats. |
+| **Usuário Autenticado Terceiro (`Horizontal Attacker — bob`)** | `Bearer valid_token_bob` (`uid: user_bob`) | Usuário Padrão (Outro Usuário) | Testes de escalonamento horizontal de privilégios (**BOLA / IDOR**): tentativa de editar ou excluir cursos criados por `user_alice` (bloqueado com **`HTTP 403 Forbidden`**) e tentativa de Path Traversal entre chats. |
 
 ---
 
@@ -527,9 +530,22 @@ Como diferencial avançado, foram elaborados os manifestos Kubernetes em [k8s/ma
 - `HorizontalPodAutoscaler` (HPA) escalando automaticamente de 2 a 6 réplicas com base em CPU (70%);
 - `NetworkPolicy` (Zero-Trust) restringindo o tráfego de entrada dos pods do backend exclusivamente ao Ingress/Frontend.
 
+### 9.3 Enumeração de Portas, Serviços e Isolamento de Containers (Template Network)
+
+| Serviço / Container | Porta Interna | Exposição no Host | Usuário de Execução | Rede / Isolamento | Papel e Controles de Segurança |
+|---|---|---|---|---|---|
+| **`nginx` (Gateway / LB)** | `80/tcp` | `0.0.0.0:80 -> 80/tcp` | `nginx` (Worker non-root) | `coursesphere_net` (DMZ) | Ponto único de entrada HTTP, rate limit de borda (`10r/s`), headers HTTP e balanceamento Round-Robin. |
+| **`backend-1` (API Réplica 1)** | `5000/tcp` | **Não exposta ao host** (`expose: 5000`) | `appuser` (`UID 1001`, non-root) | `coursesphere_net` (Interna) | Gunicorn WSGI + Flask + Circuit Breaker; acessível apenas pelo Nginx e Prometheus. |
+| **`backend-2` (API Réplica 2)** | `5000/tcp` | **Não exposta ao host** (`expose: 5000`) | `appuser` (`UID 1001`, non-root) | `coursesphere_net` (Interna) | Segunda réplica ativa garantindo alta disponibilidade e tolerância a falhas. |
+| **`frontend` (SPA Estático)** | `80/tcp` | **Não exposta ao host** (`expose: 80`) | `nginx` (`UID 101`, non-root) | `coursesphere_net` (Interna) | Artefato React/Vite compilado servido via proxy reverso do gateway Nginx. |
+| **`prometheus` (Métricas SRE)** | `9090/tcp` | `127.0.0.1:9090 -> 9090/tcp` | `nobody` (`UID 65534`, non-root) | `coursesphere_net` (Monitoramento) | Coleta passiva (`scrape_interval: 5s`) do endpoint `/metrics` de `backend-1` e `backend-2`. |
+| **`grafana` (Dashboard SRE)** | `3000/tcp` | `127.0.0.1:3001 -> 3000/tcp` | `grafana` (`UID 472`, non-root) | `coursesphere_net` (Monitoramento) | Visualização de SLIs/SLOs, percentis de latência e estado dos Circuit Breakers. |
+
 ---
 
-## 10. Roadmap Estratégico de Remediação Priorizada
+## 10. Roadmap Estratégico de Remediação e Conformidade (Template Enterprise)
+
+### 10.1 Priorização por Severidade e Esforço
 
 A priorização abaixo combina **Severidade (Impacto de Negócio)** $\times$ **Esforço de Implementação**:
 
@@ -539,6 +555,20 @@ A priorização abaixo combina **Severidade (Impacto de Negócio)** $\times$ **E
 | **P1 — Curto Prazo (2–7 dias)** | Implementar controle de acesso por proprietário no CRUD de cursos, anti-Path Traversal em chats (`PT-002`), exigir Bearer token via header (`PT-005`) e ativar Rate Limiting/Lockout (`PT-008`). | Impede adulteração de dados entre usuários (BOLA), sequestro de sessão por vazamento de logs e ataques de força bruta. | ✅ **Concluído** |
 | **P2 — Médio Prazo (7–30 dias)** | Atualizar dependências vulneráveis do frontend (`PT-006`), substituir PRNG fraco por HMAC-SHA256 (`PT-007`), conteinerizar com Gunicorn + Nginx LB e instrumentar logs JSON + `/health` + `/metrics`. | Elimina CVEs conhecidos na cadeia de suprimentos, remove pontos únicos de falha (SPOF) e garante visibilidade de SLIs/SLOs. | ✅ **Concluído** |
 | **P3 — Evolução Arquitetural (30–90 dias)** | Migrar persistência de SQLite para PostgreSQL gerenciado, adotar Redis para Rate Limiting distribuído e integrar HashiCorp Vault / AWS Secrets Manager ao Kubernetes. | Permite escalabilidade horizontal de escrita sem lock de arquivo e rotação automática de segredos em nuvem. | 📋 **Planejado / Arquitetado em `k8s/`** |
+
+### 10.2 Mapeamento de Conformidade Regulatória (Compliance Mapping)
+
+| Achado Remediado | OWASP Top 10 (2021) | ISO/IEC 27001:2022 | SOC 2 (Trust Services Criteria) | PCI DSS v4.0 | LGPD (Lei nº 13.709/2018) / GDPR |
+|---|---|---|---|---|---|
+| **PT-001 (SQL Injection)** | A03:2021 – Injection | A.8.28 (Codificação Segura) | CC6.1 / CC7.1 | Req. 6.2.4 | Art. 46 (Medidas técnicas contra acesso não autorizado) |
+| **PT-002 (BOLA / IDOR / Path Traversal)** | A01:2021 – Broken Access Control | A.8.3 (Restrição de Acesso à Informação) | CC6.1 / CC6.3 | Req. 7.2.1 | Art. 6º, VII (Segurança) e Art. 46 |
+| **PT-003 (Credenciais Hardcoded)** | A07:2021 – Auth Failures | A.5.17 (Informações de Autenticação) | CC6.1 / CC6.6 | Req. 8.6.2 | Art. 46 (Proteção de credenciais e chaves) |
+| **PT-004 (Debug RCE & Container Root)** | A05:2021 – Security Misconfig | A.8.9 (Gestão de Configuração) | CC6.8 / CC7.2 | Req. 2.2.1 | Art. 46 e Art. 50 (Boas práticas e governança) |
+| **PT-005 (Token em Query String GET)** | A07:2021 – Auth Failures | A.8.24 (Uso de Criptografia e Transporte) | CC6.7 | Req. 4.2.1 | Art. 46 (Prevenção de vazamento de sessão em logs) |
+| **PT-006 (Dependências Vulneráveis)** | A06:2021 – Vulnerable Components | A.8.8 (Gestão de Vulnerabilidades Técnicas) | CC7.1 | Req. 6.3.3 | Art. 46 (Atualização contínua de componentes) |
+| **PT-007 (Hash/PRNG Fraco -> `scrypt`/HMAC)** | A02:2021 – Cryptographic Failures | A.8.24 (Uso de Criptografia) | CC6.1 | Req. 3.5.1 / 8.3.2 | Art. 46 (Criptografia forte de dados sensíveis) |
+| **PT-008 (Rate Limit, CSRF & Headers HTTP)** | A05:2021 – Security Misconfig | A.8.20 (Segurança de Redes) | CC6.6 / A1.2 | Req. 6.4.1 / 8.3.4 | Art. 46 (Proteção contra abusos automatizados) |
+| **PT-009 (Prompt Injection & XSS Sanitization)** | A03:2021 – Injection | A.8.28 (Codificação Segura) | CC6.1 | Req. 6.2.4 | Art. 46 (Integridade do processamento) |
 
 ---
 
@@ -586,3 +616,44 @@ CourseSphere/backend/tests/test_endpoints_security.py::test_circuit_breaker_stat
 
 ============================== 20 passed in 0.85s ==============================
 ```
+
+### Apêndice C — Resultado do SAST Semgrep & SCA Contínuo (Dependabot)
+- **Antes da Remediação** ([audit_reports/semgrep_report.json](file:///home/bruno/desafio_tecnico_vlab/audit_reports/semgrep_report.json)): **24 achados bloqueantes** (incluindo `formatted-sql-query`, `flask-wtf-csrf-disabled`, `dockerfile.security.missing-user`, `github-actions-mutable-action-tag`).
+- **Após a Remediação** ([audit_reports/semgrep_post_fix_report.json](file:///home/bruno/desafio_tecnico_vlab/audit_reports/semgrep_post_fix_report.json)): **0 findings em 519 regras e 131 arquivos analisados**.
+- **Automação de SCA Contínuo (Dependabot)**: Configurado em [.github/dependabot.yml](file:///home/bruno/desafio_tecnico_vlab/CourseSphere/.github/dependabot.yml) para varredura semanal automática de vulnerabilidades nos ecossistemas `pip`, `npm`, `docker` e `github-actions`.
+
+### Apêndice D — Mapa Completo de Endpoints da Aplicação (`Application Sitemap` — Template Web-App)
+
+| Método HTTP | Rota / Endpoint | Autenticação Exigida | Controle de Autorização / Segurança Aplicado |
+|---|---|---|---|
+| `GET` | `/health` | Pública (Probe SRE) | Valida conectividade SQLite (`SELECT 1`) + estado dos Circuit Breakers (`200` / `503`). |
+| `GET` | `/metrics` | Interna (Scraper Prometheus) | Exporta métricas OpenMetrics (Histogramas de latência, contadores HTTP, auth e Circuit Breaker). |
+| `GET` | `/courses/<int:course_id>` | Pública | Consulta parametrizada (`?`) contra SQL Injection. |
+| `GET` | `/courses/semester/<semester>` | Pública | Consulta parametrizada (`?`) contra SQL Injection. |
+| `GET` | `/courses/department/<dept>` | Pública | Consulta parametrizada (`?`) contra SQL Injection. |
+| `GET` | `/courses/instructor/<instructor>` | Pública | Consulta parametrizada (`?`) contra SQL Injection. |
+| `POST` | `/courses/query-filter` | Pública | Validação de JSON (`415`), CSRF Origin check e cláusulas `WHERE` 100% parametrizadas (`?`). |
+| `POST` | `/courses` | **Bearer Token Obrigatório** | Sanitização anti-XSS (`sanitize_string`), validação de payload e vínculo ao `creator_uid` do token. |
+| `PUT` | `/courses/<int:course_id>` | **Bearer Token Obrigatório** | **Prevenção de BOLA/IDOR**: exige `course["creator_uid"] == uid` (retorna **`HTTP 403 Forbidden`** para terceiros). |
+| `DELETE` | `/courses/<int:course_id>` | **Bearer Token Obrigatório** | **Prevenção de BOLA/IDOR**: exige `course["creator_uid"] == uid` (retorna **`HTTP 403 Forbidden`** para terceiros). |
+| `POST` | `/users/login` | Pública (Credenciais no Body) | **Rate Limit (10 req/min) + Brute-Force Lockout** após 5 falhas (`HTTP 429` + `Retry-After`), verificação `scrypt` e emissão de token HMAC com `exp`. |
+| `POST` | `/users/create` | **Bearer Token Obrigatório** | Rejeita token em query string (`401`), valida header `Authorization: Bearer` e cria perfil no Firebase. |
+| `GET/POST` | `/users/info` | **Bearer Token Obrigatório** | Rejeita `?id_token=` na URL (`401`); extrai identidade exclusivamente do token Bearer verificado. |
+| `POST` | `/users/query` | **Bearer Token Obrigatório** | Autenticação obrigatória (`CWE-306`), delimitadores anti-Prompt Injection (`<user_query>`) e Circuit Breaker OpenAI. |
+| `POST` | `/chats/<chat_id>/messages` | **Bearer Token Obrigatório** | Regex anti-Path Traversal (`validate_path_identifier`) + verificação de posse do chat. |
+| `DELETE` | `/chats/<chat_id>` | **Bearer Token Obrigatório** | Regex anti-Path Traversal + verificação de propriedade do chat antes de excluir. |
+| `POST` | `/hash` | **Bearer Token Obrigatório** | Gera código de compartimento via `HMAC-SHA256` com chave secreta e CSPRNG (`secrets`). |
+
+### Apêndice E — Glossário de Termos e Siglas (`Glossary of Terms` — Template Enterprise)
+
+| Sigla / Termo | Definição Técnica e Executiva |
+|---|---|
+| **BOLA / IDOR** | *Broken Object Level Authorization / Insecure Direct Object Reference*: Falha em que um usuário autenticado consegue acessar, editar ou excluir objetos pertencentes a outro usuário manipulando o identificador na requisição. |
+| **Circuit Breaker** | Padrão de resiliência SRE que monitora falhas em integrações externas (banco, Firebase, OpenAI) e interrompe chamadas imediatamente (*fast-fail*) quando o serviço degrada, evitando efeito cascata. |
+| **CSPRNG** | *Cryptographically Secure Pseudo-Random Number Generator*: Gerador de números aleatórios seguro para fins criptográficos (módulo `secrets` do Python). |
+| **CVSS v3.1** | *Common Vulnerability Scoring System*: Padrão internacional (FIRST.org) que pontua a severidade de vulnerabilidades de `0.0` a `10.0`. |
+| **CWE** | *Common Weakness Enumeration*: Catálogo padronizado de tipos de fraquezas de software e hardware mantido pela MITRE. |
+| **Error Budget** | Orçamento de erro permitido pelo SLO (ex.: para um SLO de disponibilidade de `99,5%`, o orçamento de erro mensal é de `0,5%` ou ~3,6 horas). |
+| **SAST / SCA** | *Static Application Security Testing* (análise estática de código-fonte, ex.: Bandit/Semgrep) e *Software Composition Analysis* (auditoria de vulnerabilidades em bibliotecas de terceiros, ex.: `pip-audit`, OSV, Dependabot). |
+| **SLI / SLO** | *Service Level Indicator* (métrica quantitativa de confiabilidade, como latência ou taxa de sucesso) e *Service Level Objective* (meta percentual definida para o SLI). |
+| **STRIDE** | Metodologia de modelagem de ameaças criada pela Microsoft (*Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege*). |
