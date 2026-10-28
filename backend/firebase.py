@@ -230,7 +230,7 @@ class Firebase:
                 ref = db.reference(f"users/{uid}/info")
                 return ref.get()
             except Exception as e:
-                raise Exception(f"Error getting user info: {str(e)}")
+                logger.warning(f"Firebase user info lookup failed for {uid}, falling back to shared store: {e}")
 
         conn = create_connection()
         try:
