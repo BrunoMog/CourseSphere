@@ -1,10 +1,13 @@
 # firebase.py
 import os
 import re
+import json
+import time
 import logging
 from pathlib import Path
 
 try:
+    from backend.db import create_connection
     from backend.security import (
         hash_password,
         verify_password,
@@ -12,6 +15,7 @@ try:
         verify_session_token,
     )
 except ImportError:
+    from db import create_connection
     from security import (
         hash_password,
         verify_password,
@@ -31,7 +35,7 @@ except ImportError:
     credentials = None
     auth = None
     db = None
-    logger.warning("firebase_admin package not installed. Running in mock/standalone mode.")
+    logger.warning("firebase_admin package not installed. Using shared SQLite persistence.")
 
 BASE_DIR = Path(__file__).resolve().parent
 CREDS_PATH = os.environ.get("FIREBASE_CREDENTIALS_PATH", str(BASE_DIR / "credentials.json"))
@@ -46,74 +50,106 @@ if HAS_FIREBASE and os.path.exists(CREDS_PATH):
     except Exception as e:
         logger.error(f"Error initializing Firebase with credentials at {CREDS_PATH}: {e}")
 else:
-    logger.info("Operating in dev/test mode for Firebase services.")
+    logger.info("Operating with shared SQLite user/chat store across workers and replicas.")
 
 
 def validate_path_identifier(identifier: str, name: str = "ID") -> str:
-    """Neutralizes path traversal attempts in Firebase database paths (CWE-22 / BOLA)."""
-    if not identifier or not re.match(r"^[a-zA-Z0-9_\-]+$", str(identifier)):
+    """Neutralizes path traversal attempts in resource paths (CWE-22 / BOLA)."""
+    if not identifier or not re.match(r"^[a-zA-Z0-9_\-]{1,128}$", str(identifier)):
         raise ValueError(f"Invalid {name}: must contain only alphanumeric, underscore, or hyphen characters.")
     return str(identifier)
-
-
-_DEV_USER_STORE = {}
-_DEV_CREDENTIALS_STORE = {}
-_DEV_CHAT_STORE = {}
 
 
 class Firebase:
     @staticmethod
     def create_user(email: str, password: str):
+        """
+        Creates a user with an scrypt password hash persisted in the shared database
+        so all Gunicorn workers and container replicas share the exact same user state.
+        If Firebase Admin is configured, also provisions the account in Firebase Auth.
+        """
+        normalized_email = email.strip().lower()
         password_hash = hash_password(password)
-        if not firebase_app or not auth:
-            uid = re.sub(r"[^a-zA-Z0-9_\-]", "_", email.split("@")[0])
-            uid = f"dev-uid-{uid}"
-            _DEV_CREDENTIALS_STORE[email.lower()] = {
-                "uid": uid,
-                "email": email,
-                "password_hash": password_hash,
-            }
-            return {
-                "message": "User created successfully",
-                "user_id": uid,
-                "email": email,
-            }
+
+        if firebase_app and auth:
+            try:
+                fb_user = auth.create_user(email=normalized_email, password=password)
+                uid = fb_user.uid
+            except Exception as e:
+                raise Exception(f"Error creating user in Firebase: {str(e)}")
+        else:
+            clean_prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_", normalized_email.split("@")[0])
+            uid = f"user-{clean_prefix}"
+
+        conn = create_connection()
         try:
-            user = auth.create_user(email=email, password=password)
-            return {
-                "message": "User created successfully",
-                "user_id": user.uid,
-                "email": user.email,
-            }
-        except Exception as e:
-            raise Exception(f"Error creating user: {str(e)}")
+            default_profile = json.dumps({"email": normalized_email, "uid": uid})
+            conn.execute(
+                """
+                INSERT INTO app_users (uid, email, password_hash, user_info_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET
+                    password_hash = excluded.password_hash
+                """,
+                (uid, normalized_email, password_hash, default_profile, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return {
+            "message": "User created successfully",
+            "user_id": uid,
+            "email": normalized_email,
+        }
 
     @staticmethod
     def authenticate_user(email: str, password: str) -> dict:
-        """Authenticates a user with scrypt verification and issues a signed expiring session token."""
-        record = _DEV_CREDENTIALS_STORE.get(email.lower())
-        if not record or not verify_password(password, record["password_hash"]):
+        """
+        Authenticates a user against the shared `app_users` table using constant-time scrypt
+        verification and issues an expiring HMAC-SHA256 session token.
+        """
+        normalized_email = email.strip().lower()
+        conn = create_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT uid, email, password_hash FROM app_users WHERE email = ?",
+                (normalized_email,),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+
+        if not row or not verify_password(password, row["password_hash"]):
             raise ValueError("Invalid email or password.")
-        token = create_session_token(record["uid"], ttl_seconds=3600)
+
+        token = create_session_token(row["uid"], ttl_seconds=3600)
         return {
             "id_token": token,
-            "user_id": record["uid"],
-            "email": record["email"],
+            "user_id": row["uid"],
+            "email": row["email"],
             "expires_in": 3600,
         }
 
     @staticmethod
     def delete_user(uid: str):
         uid = validate_path_identifier(uid, "User ID")
-        if not firebase_app or not auth:
-            _DEV_USER_STORE.pop(uid, None)
-            return
+        conn = create_connection()
         try:
-            auth.delete_user(uid)
-            ref = db.reference(f"users/{uid}")
-            ref.delete()
-        except Exception as e:
-            raise Exception(f"Error deleting user: {str(e)}")
+            conn.execute("DELETE FROM app_users WHERE uid = ?", (uid,))
+            conn.execute("DELETE FROM user_chats WHERE uid = ?", (uid,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        if firebase_app and auth and db:
+            try:
+                auth.delete_user(uid)
+                ref = db.reference(f"users/{uid}")
+                ref.delete()
+            except Exception as e:
+                raise Exception(f"Error deleting user: {str(e)}")
 
     @staticmethod
     def verify_id_token(id_token: str):
@@ -136,26 +172,52 @@ class Firebase:
     @staticmethod
     def set_user_info(uid: str, user_info: dict):
         uid = validate_path_identifier(uid, "User ID")
-        if not firebase_app or not db:
-            _DEV_USER_STORE[uid] = user_info
-            return
+        conn = create_connection()
         try:
-            ref = db.reference(f"users/{uid}/info")
-            ref.set(user_info)
-        except Exception as e:
-            raise Exception(f"Error setting user info: {str(e)}")
+            serialized = json.dumps(user_info)
+            cur = conn.cursor()
+            cur.execute("SELECT uid FROM app_users WHERE uid = ?", (uid,))
+            if cur.fetchone():
+                cur.execute(
+                    "UPDATE app_users SET user_info_json = ? WHERE uid = ?",
+                    (serialized, uid),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO app_users (uid, email, password_hash, user_info_json) VALUES (?, ?, ?, ?)",
+                    (uid, f"{uid}@coursesphere.local", "external_auth", serialized),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        if firebase_app and db:
+            try:
+                ref = db.reference(f"users/{uid}/info")
+                ref.set(user_info)
+            except Exception as e:
+                raise Exception(f"Error setting user info: {str(e)}")
 
     @staticmethod
     def get_user_info(uid: str):
         uid = validate_path_identifier(uid, "User ID")
-        if not firebase_app or not db:
-            return _DEV_USER_STORE.get(uid, {"email": f"{uid}@example.com", "uid": uid})
+        if firebase_app and db:
+            try:
+                ref = db.reference(f"users/{uid}/info")
+                return ref.get()
+            except Exception as e:
+                raise Exception(f"Error getting user info: {str(e)}")
+
+        conn = create_connection()
         try:
-            ref = db.reference(f"users/{uid}/info")
-            user_info = ref.get()
-            return user_info
-        except Exception as e:
-            raise Exception(f"Error getting user info: {str(e)}")
+            cur = conn.cursor()
+            cur.execute("SELECT user_info_json, email FROM app_users WHERE uid = ?", (uid,))
+            row = cur.fetchone()
+            if row and row["user_info_json"]:
+                return json.loads(row["user_info_json"])
+            return {"email": f"{uid}@example.com", "uid": uid}
+        finally:
+            conn.close()
 
     @staticmethod
     def try_get_user_info(id_token):
@@ -167,24 +229,17 @@ class Firebase:
     @staticmethod
     def update_user_info(uid: str, updates: dict):
         uid = validate_path_identifier(uid, "User ID")
-        if not firebase_app or not db:
-            current = _DEV_USER_STORE.get(uid, {})
-            current.update(updates)
-            _DEV_USER_STORE[uid] = current
-            return
-        try:
-            ref = db.reference(f"users/{uid}/info")
-            ref.update(updates)
-        except Exception as e:
-            raise Exception(f"Error updating user info: {str(e)}")
+        current = Firebase.get_user_info(uid) or {}
+        current.update(updates)
+        Firebase.set_user_info(uid, current)
 
     @staticmethod
     def create_document(collection: str, document_id: str, data: dict):
         collection = validate_path_identifier(collection, "Collection")
         document_id = validate_path_identifier(document_id, "Document ID")
+        if not firebase_app or not db:
+            return
         try:
-            if not firebase_app or not db:
-                return
             ref = db.reference(f"{collection}/{document_id}")
             ref.set(data)
         except Exception as e:
@@ -194,9 +249,9 @@ class Firebase:
     def get_document(collection: str, document_id: str):
         collection = validate_path_identifier(collection, "Collection")
         document_id = validate_path_identifier(document_id, "Document ID")
+        if not firebase_app or not db:
+            return None
         try:
-            if not firebase_app or not db:
-                return None
             ref = db.reference(f"{collection}/{document_id}")
             return ref.get()
         except Exception as e:
@@ -206,9 +261,9 @@ class Firebase:
     def update_document(collection: str, document_id: str, updates: dict):
         collection = validate_path_identifier(collection, "Collection")
         document_id = validate_path_identifier(document_id, "Document ID")
+        if not firebase_app or not db:
+            return
         try:
-            if not firebase_app or not db:
-                return
             ref = db.reference(f"{collection}/{document_id}")
             ref.update(updates)
         except Exception as e:
@@ -218,9 +273,9 @@ class Firebase:
     def delete_document(collection: str, document_id: str):
         collection = validate_path_identifier(collection, "Collection")
         document_id = validate_path_identifier(document_id, "Document ID")
+        if not firebase_app or not db:
+            return
         try:
-            if not firebase_app or not db:
-                return
             ref = db.reference(f"{collection}/{document_id}")
             ref.delete()
         except Exception as e:
@@ -230,34 +285,58 @@ class Firebase:
     def save_chat(uid: str, chat_id: str, messages: list):
         uid = validate_path_identifier(uid, "User ID")
         chat_id = validate_path_identifier(chat_id, "Chat ID")
+        if not isinstance(messages, list):
+            raise ValueError("Messages must be a list of dictionaries.")
+        for message in messages:
+            if not isinstance(message, dict):
+                raise ValueError("Each message must be a dictionary.")
+
+        conn = create_connection()
         try:
-            if not isinstance(messages, list):
-                raise ValueError("Messages must be a list of dictionaries.")
-            for message in messages:
-                if not isinstance(message, dict):
-                    raise ValueError("Each message must be a dictionary.")
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT messages_json FROM user_chats WHERE uid = ? AND chat_id = ?",
+                (uid, chat_id),
+            )
+            row = cur.fetchone()
+            existing = json.loads(row["messages_json"]) if row and row["messages_json"] else []
+            existing.extend(messages)
+            cur.execute(
+                """
+                INSERT INTO user_chats (uid, chat_id, messages_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(uid, chat_id) DO UPDATE SET
+                    messages_json = excluded.messages_json,
+                    updated_at = excluded.updated_at
+                """,
+                (uid, chat_id, json.dumps(existing), time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
-            if not firebase_app or not db:
-                existing = _DEV_CHAT_STORE.get((uid, chat_id), [])
-                existing.extend(messages)
-                _DEV_CHAT_STORE[(uid, chat_id)] = existing
-                return
-
-            ref = db.reference(f"users/{uid}/chats/{chat_id}/messages")
-            for message in messages:
-                ref.push(message)
-        except Exception as e:
-            raise Exception(f"Error saving messages: {str(e)}")
+        if firebase_app and db:
+            try:
+                ref = db.reference(f"users/{uid}/chats/{chat_id}/messages")
+                for message in messages:
+                    ref.push(message)
+            except Exception as e:
+                raise Exception(f"Error saving messages: {str(e)}")
 
     @staticmethod
     def delete_chat(uid: str, chat_id: str):
         uid = validate_path_identifier(uid, "User ID")
         chat_id = validate_path_identifier(chat_id, "Chat ID")
+        conn = create_connection()
         try:
-            if not firebase_app or not db:
-                _DEV_CHAT_STORE.pop((uid, chat_id), None)
-                return
-            ref = db.reference(f"users/{uid}/chats/{chat_id}")
-            ref.delete()
-        except Exception as e:
-            raise Exception(f"Error deleting chat session: {str(e)}")
+            conn.execute("DELETE FROM user_chats WHERE uid = ? AND chat_id = ?", (uid, chat_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+        if firebase_app and db:
+            try:
+                ref = db.reference(f"users/{uid}/chats/{chat_id}")
+                ref.delete()
+            except Exception as e:
+                raise Exception(f"Error deleting chat session: {str(e)}")

@@ -6,20 +6,30 @@ import logging
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 
-from main import hashFunction
-from firebase import Firebase
-from security import (
-    rate_limiter,
-    sanitize_string,
-    validate_email,
-    verify_state_changing_request,
-)
-from resilience import CIRCUIT_BREAKERS, CircuitBreakerOpenException
-
 try:
-    from blueprints.courses import courses_bp
-except ImportError:
+    from backend.db import create_connection
+    from backend.main import hashFunction
+    from backend.firebase import Firebase
+    from backend.security import (
+        rate_limiter,
+        sanitize_string,
+        validate_email,
+        verify_state_changing_request,
+    )
+    from backend.resilience import CIRCUIT_BREAKERS, CircuitBreakerOpenException
     from backend.blueprints.courses import courses_bp
+except ImportError:
+    from db import create_connection
+    from main import hashFunction
+    from firebase import Firebase
+    from security import (
+        rate_limiter,
+        sanitize_string,
+        validate_email,
+        verify_state_changing_request,
+    )
+    from resilience import CIRCUIT_BREAKERS, CircuitBreakerOpenException
+    from blueprints.courses import courses_bp
 
 # ---------------------------------------------------------
 # SRE Requirement: Structured JSON Logging
@@ -73,25 +83,71 @@ CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=True)
 # Register courses blueprint safely
 app.register_blueprint(courses_bp)
 
-# In-memory Prometheus metrics registry for SRE compliance
-METRICS = {
-    "http_requests_total": {},
-    "http_request_duration_seconds_sum": 0.0,
-    "http_request_duration_seconds_count": 0,
-    "http_request_duration_buckets": {0.01: 0, 0.05: 0, 0.1: 0, 0.2: 0, 0.5: 0, 1.0: 0, float("inf"): 0},
-    "auth_events_total": {"success": 0, "failure": 0, "lockout": 0},
-    "rate_limit_exceeded_total": 0,
-}
+HISTOGRAM_BUCKETS = (0.01, 0.05, 0.1, 0.2, 0.5, 1.0, float("inf"))
+
+
+def _increment_shared_metric(metric_key: str, delta: float = 1.0):
+    """Atomically increments a metric counter/bucket in the shared SQLite store across Gunicorn workers."""
+    try:
+        conn = create_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO prometheus_metrics (metric_key, metric_value)
+                VALUES (?, ?)
+                ON CONFLICT(metric_key) DO UPDATE SET
+                    metric_value = prometheus_metrics.metric_value + excluded.metric_value
+                """,
+                (metric_key, float(delta)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("Telemetry write skipped: %s", exc)
+
+
+def _read_shared_metrics() -> dict:
+    """Reads all accumulated Prometheus metrics across workers from the shared database."""
+    try:
+        conn = create_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT metric_key, metric_value FROM prometheus_metrics")
+            return {row["metric_key"]: float(row["metric_value"]) for row in cur.fetchall()}
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
 
 success_response = lambda data, code: (jsonify(data), code)
 error_response = lambda error, code: (jsonify({"error": error}), code)
 
 
+def _is_trusted_proxy(remote_addr: str) -> bool:
+    """Checks whether the immediate peer IP belongs to a configured trusted reverse proxy."""
+    if os.environ.get("TRUST_PROXY_HEADERS", "0").lower() not in ("1", "true"):
+        return False
+    trusted_prefixes = ("127.", "10.", "172.", "192.168.", "::1")
+    return bool(remote_addr and remote_addr.startswith(trusted_prefixes))
+
+
 def _get_client_ip() -> str:
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.remote_addr or "127.0.0.1"
+    """
+    Resolves the client IP safely without allowing X-Forwarded-For spoofing (CWE-290 / CWE-307).
+    - Ignores X-Forwarded-For / X-Real-IP unless `TRUST_PROXY_HEADERS=1` and the immediate peer is a trusted proxy.
+    - When behind a trusted proxy (e.g., Nginx gateway), uses `X-Real-IP` or the rightmost proxy hop.
+    """
+    remote_addr = request.remote_addr or "127.0.0.1"
+    if _is_trusted_proxy(remote_addr):
+        real_ip = request.headers.get("X-Real-IP", "").strip()
+        if real_ip:
+            return real_ip
+        forwarded = request.headers.get("X-Forwarded-For", "").strip()
+        if forwarded:
+            return forwarded.split(",")[-1].strip()
+    return remote_addr
 
 
 @app.before_request
@@ -108,7 +164,7 @@ def before_request():
     # 1. Check Brute-Force Lockout
     locked, retry_after = rate_limiter.is_locked_out(client_ip)
     if locked:
-        METRICS["auth_events_total"]["lockout"] += 1
+        _increment_shared_metric("auth_events_total:lockout", 1.0)
         logger.warning(
             f"Blocked request from locked-out IP {client_ip}",
             extra={"event_type": "auth_lockout"},
@@ -122,7 +178,7 @@ def before_request():
     allowed, remaining, retry_after = rate_limiter.check_rate_limit(f"ip:{client_ip}")
     g.rate_limit_remaining = remaining
     if not allowed:
-        METRICS["rate_limit_exceeded_total"] += 1
+        _increment_shared_metric("rate_limit_exceeded_total", 1.0)
         logger.warning(
             f"Rate limit exceeded for IP {client_ip} on {request.path}",
             extra={"event_type": "rate_limit_exceeded"},
@@ -143,19 +199,25 @@ def before_request():
 def after_request(response):
     duration = time.time() - getattr(g, "start_time", time.time())
 
-    # Record Prometheus metrics including latency histogram buckets (for SLI/SLO P95/200ms tracking)
-    key = (request.method, request.path, response.status_code)
-    METRICS["http_requests_total"][key] = METRICS["http_requests_total"].get(key, 0) + 1
-    METRICS["http_request_duration_seconds_sum"] += duration
-    METRICS["http_request_duration_seconds_count"] += 1
-    for bucket in METRICS["http_request_duration_buckets"]:
+    # Use Flask route pattern instead of raw request.path to prevent cardinality explosion in Prometheus
+    route_label = request.url_rule.rule if request.url_rule else "/unmatched"
+    _increment_shared_metric(f"http_req:{request.method}|{route_label}|{response.status_code}", 1.0)
+    _increment_shared_metric("http_duration_sum", duration)
+    _increment_shared_metric("http_duration_count", 1.0)
+    for bucket in HISTOGRAM_BUCKETS:
         if duration <= bucket:
-            METRICS["http_request_duration_buckets"][bucket] += 1
+            b_label = "+Inf" if bucket == float("inf") else str(bucket)
+            _increment_shared_metric(f"http_bucket:{b_label}", 1.0)
 
     # Hardening: Comprehensive HTTP Security Headers (OWASP A05)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if (
+        request.is_secure
+        or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        or os.environ.get("ENABLE_HSTS_HEADER", "1") == "1"
+    ):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     response.headers["Content-Security-Policy"] = (
@@ -186,8 +248,6 @@ def after_request(response):
 @app.route("/health", methods=["GET"])
 def health_check():
     """Liveness and Readiness probe endpoint for Docker & Kubernetes orchestrators."""
-    from db import create_connection
-
     db_status = "healthy"
     try:
         def _ping_db():
@@ -214,32 +274,46 @@ def health_check():
 
 @app.route("/metrics", methods=["GET"])
 def metrics():
-    """Prometheus-compatible plain text metrics exposition (OpenMetrics format)."""
+    """Prometheus-compatible plain text metrics exposition (OpenMetrics format) aggregated across workers."""
+    stored = _read_shared_metrics()
     lines = [
-        "# HELP http_requests_total Total number of HTTP requests processed.",
+        "# HELP http_requests_total Total number of HTTP requests processed (bounded route cardinality).",
         "# TYPE http_requests_total counter",
     ]
-    for (method, path, status), count in METRICS["http_requests_total"].items():
-        lines.append(f'http_requests_total{{method="{method}",path="{path}",status="{status}"}} {count}')
+    for key, val in sorted(stored.items()):
+        if key.startswith("http_req:"):
+            parts = key[len("http_req:"):].split("|")
+            if len(parts) == 3:
+                method, route_rule, status = parts
+                lines.append(f'http_requests_total{{method="{method}",path="{route_rule}",status="{status}"}} {int(val)}')
 
     lines.extend([
         "# HELP http_request_duration_seconds Request duration histogram in seconds.",
         "# TYPE http_request_duration_seconds histogram",
     ])
-    for bound, count in METRICS["http_request_duration_buckets"].items():
+    for bound in HISTOGRAM_BUCKETS:
         le_label = "+Inf" if bound == float("inf") else str(bound)
-        lines.append(f'http_request_duration_seconds_bucket{{le="{le_label}"}} {count}')
+        b_count = int(stored.get(f"http_bucket:{le_label}", 0))
+        lines.append(f'http_request_duration_seconds_bucket{{le="{le_label}"}} {b_count}')
+
+    dur_sum = stored.get("http_duration_sum", 0.0)
+    dur_count = int(stored.get("http_duration_count", 0))
+    auth_success = int(stored.get("auth_events_total:success", 0))
+    auth_failure = int(stored.get("auth_events_total:failure", 0))
+    auth_lockout = int(stored.get("auth_events_total:lockout", 0))
+    rate_exceeded = int(stored.get("rate_limit_exceeded_total", 0))
+
     lines.extend([
-        f'http_request_duration_seconds_sum {METRICS["http_request_duration_seconds_sum"]:.6f}',
-        f'http_request_duration_seconds_count {METRICS["http_request_duration_seconds_count"]}',
+        f"http_request_duration_seconds_sum {dur_sum:.6f}",
+        f"http_request_duration_seconds_count {dur_count}",
         "# HELP auth_events_total Total count of authentication events by outcome.",
         "# TYPE auth_events_total counter",
-        f'auth_events_total{{status="success"}} {METRICS["auth_events_total"]["success"]}',
-        f'auth_events_total{{status="failure"}} {METRICS["auth_events_total"]["failure"]}',
-        f'auth_events_total{{status="lockout"}} {METRICS["auth_events_total"]["lockout"]}',
+        f'auth_events_total{{status="success"}} {auth_success}',
+        f'auth_events_total{{status="failure"}} {auth_failure}',
+        f'auth_events_total{{status="lockout"}} {auth_lockout}',
         "# HELP rate_limit_exceeded_total Total requests rejected by rate limiter.",
         "# TYPE rate_limit_exceeded_total counter",
-        f'rate_limit_exceeded_total {METRICS["rate_limit_exceeded_total"]}',
+        f"rate_limit_exceeded_total {rate_exceeded}",
         "# HELP circuit_breaker_state Current state of service circuit breakers (0=CLOSED, 1=HALF_OPEN, 2=OPEN).",
         "# TYPE circuit_breaker_state gauge",
     ])
@@ -258,7 +332,7 @@ def get_auth_token():
     Rejects tokens passed via URL query strings to avoid access log leakage (CWE-598).
     """
     if "id_token" in request.args:
-        METRICS["auth_events_total"]["failure"] += 1
+        _increment_shared_metric("auth_events_total:failure", 1.0)
         logger.warning(
             "Rejected insecure token passed via URL query parameter.",
             extra={"event_type": "auth_failure"},
@@ -280,18 +354,19 @@ def verify_request_token(token: str):
     client_ip = _get_client_ip()
     try:
         decoded = CIRCUIT_BREAKERS["firebase"].call(Firebase.verify_id_token, token)
-        METRICS["auth_events_total"]["success"] += 1
+        _increment_shared_metric("auth_events_total:success", 1.0)
         return decoded, None
     except CircuitBreakerOpenException as exc:
         return None, (str(exc), 503)
     except Exception as exc:
-        METRICS["auth_events_total"]["failure"] += 1
+        _increment_shared_metric("auth_events_total:failure", 1.0)
         locked, retry_after = rate_limiter.record_auth_failure(client_ip)
         logger.warning(
             f"Authentication verification failed for IP {client_ip}: {exc}",
             extra={"event_type": "auth_failure"},
         )
         if locked:
+            _increment_shared_metric("auth_events_total:lockout", 1.0)
             return None, ("Too many failed authentication attempts. Account/IP locked.", 429)
         return None, ("Invalid or expired authentication token.", 401)
 
@@ -316,11 +391,11 @@ def create_user():
 
     try:
         user_result = CIRCUIT_BREAKERS["firebase"].call(Firebase.create_user, email, password)
-        METRICS["auth_events_total"]["success"] += 1
+        _increment_shared_metric("auth_events_total:success", 1.0)
         logger.info(f"User created successfully: {email}", extra={"event_type": "user_created"})
         return success_response(user_result, 200)
     except Exception as e:
-        METRICS["auth_events_total"]["failure"] += 1
+        _increment_shared_metric("auth_events_total:failure", 1.0)
         logger.warning(f"User creation failed: {e}", extra={"event_type": "auth_failure"})
         return error_response("Failed to create user. Verify email format or password policy.", 400)
 
@@ -342,15 +417,15 @@ def login_user():
     try:
         auth_result = Firebase.authenticate_user(email, password)
         rate_limiter.clear_auth_failures(client_ip)
-        METRICS["auth_events_total"]["success"] += 1
+        _increment_shared_metric("auth_events_total:success", 1.0)
         logger.info(f"User logged in successfully: {email}", extra={"event_type": "login_success"})
         return success_response(auth_result, 200)
     except Exception as e:
-        METRICS["auth_events_total"]["failure"] += 1
+        _increment_shared_metric("auth_events_total:failure", 1.0)
         locked, retry_after = rate_limiter.record_auth_failure(client_ip)
         logger.warning(f"Failed login attempt for {email} from {client_ip}: {e}", extra={"event_type": "login_failure"})
         if locked:
-            METRICS["auth_events_total"]["lockout"] += 1
+            _increment_shared_metric("auth_events_total:lockout", 1.0)
             resp = jsonify({"error": "Account/IP temporarily locked due to repeated failed login attempts."})
             resp.status_code = 429
             resp.headers["Retry-After"] = str(retry_after)
@@ -439,7 +514,10 @@ def get_user_query():
         return error_response("Query exceeds maximum allowed length of 1000 characters.", 400)
 
     try:
-        from query_manager import QueryManager
+        try:
+            from backend.query_manager import QueryManager
+        except ImportError:
+            from query_manager import QueryManager
 
         uid = decoded.get("uid")
         user_info = Firebase.get_user_info(uid)

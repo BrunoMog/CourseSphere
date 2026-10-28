@@ -1,3 +1,4 @@
+import os
 import pytest
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from endpoints import app
 from security import (
     rate_limiter,
+    get_secret_key,
     hash_password,
     verify_password,
     create_session_token,
@@ -17,8 +19,10 @@ from resilience import CircuitBreaker, CircuitBreakerOpenException, CIRCUIT_BREA
 
 
 @pytest.fixture(autouse=True)
-def reset_security_state():
-    """Reset rate limiter and circuit breakers before each test."""
+def isolated_test_env(tmp_path, monkeypatch):
+    """Ensure each test uses an isolated SQLite database and clean rate limiter / circuit breaker state."""
+    db_file = tmp_path / "test_endpoints.sqlite.db"
+    monkeypatch.setenv("COURSESPHERE_DB_PATH", str(db_file))
     rate_limiter.reset()
     for cb in CIRCUIT_BREAKERS.values():
         cb.reset()
@@ -53,6 +57,19 @@ def test_metrics_endpoint(client):
     assert "http_request_duration_seconds_bucket" in text
     assert "circuit_breaker_state" in text
     assert "auth_events_total" in text
+
+
+def test_metrics_route_pattern_bounded_cardinality(client):
+    """
+    Test SRE Fix: Prometheus metrics use Flask route rule patterns (`/courses/<int:course_id>`)
+    and `/unmatched` instead of raw client URL paths, preventing cardinality explosion.
+    """
+    client.get("/courses/12345")
+    client.get("/nonexistent-high-cardinality-path-xyz987")
+    text = client.get("/metrics").get_data(as_text=True)
+    assert 'path="/courses/<int:course_id>"' in text
+    assert 'path="/unmatched"' in text
+    assert "nonexistent-high-cardinality-path-xyz987" not in text
 
 
 def test_security_headers_present(client):
@@ -146,12 +163,23 @@ def test_scrypt_password_hashing_and_session_token_lifecycle(client):
     assert info_resp.status_code == 200
 
     # Verify expired token is rejected
-    expired_token = create_session_token("dev-uid-student", ttl_seconds=-10)
+    expired_token = create_session_token("user-student", ttl_seconds=-10)
     with pytest.raises(ValueError, match="expired"):
         verify_session_token(expired_token)
 
     expired_resp = client.get("/users/info", headers={"Authorization": f"Bearer {expired_token}"})
     assert expired_resp.status_code == 401
+
+
+def test_production_mode_fails_without_secret_key(monkeypatch):
+    """
+    Test Critical Fix: In production mode, missing COURSESPHERE_SECRET_KEY fails closed
+    instead of falling back to any hardcoded secret string.
+    """
+    monkeypatch.delenv("COURSESPHERE_SECRET_KEY", raising=False)
+    monkeypatch.setenv("COURSESPHERE_ENV", "production")
+    with pytest.raises(RuntimeError, match="COURSESPHERE_SECRET_KEY"):
+        get_secret_key()
 
 
 def test_brute_force_lockout_on_failed_logins(client):
@@ -168,6 +196,30 @@ def test_brute_force_lockout_on_failed_logins(client):
     fifth_resp = client.post("/users/login", json={"email": "lockout@cornell.edu", "password": "WrongPassword"})
     assert fifth_resp.status_code == 429
     assert "Retry-After" in fifth_resp.headers
+
+
+def test_rate_limit_cannot_be_bypassed_via_x_forwarded_for_spoofing(client):
+    """
+    Test High Fix: Spoofing arbitrary X-Forwarded-For headers from an untrusted client
+    cannot bypass brute-force lockout or rate limiting.
+    """
+    client.post("/users/create", json={"email": "spoof@cornell.edu", "password": "CorrectPassword123"})
+
+    for i in range(4):
+        resp = client.post(
+            "/users/login",
+            headers={"X-Forwarded-For": f"203.0.113.{i + 10}"},
+            json={"email": "spoof@cornell.edu", "password": "WrongPassword"},
+        )
+        assert resp.status_code == 401
+
+    # Even with a brand new spoofed X-Forwarded-For IP, the 5th attempt is locked out (HTTP 429)
+    fifth_resp = client.post(
+        "/users/login",
+        headers={"X-Forwarded-For": "198.51.100.99"},
+        json={"email": "spoof@cornell.edu", "password": "WrongPassword"},
+    )
+    assert fifth_resp.status_code == 429
 
 
 def test_csrf_and_content_type_protection(client):
@@ -212,3 +264,60 @@ def test_circuit_breaker_state_transitions():
     # While OPEN, immediately fast-fails with CircuitBreakerOpenException
     with pytest.raises(CircuitBreakerOpenException):
         cb.call(lambda: "should not execute")
+
+
+def test_multi_replica_shared_state_consistency(client):
+    """
+    Test Critical Fix: User accounts, session tokens, courses, and rate-limit state
+    created on Replica 1 are immediately available and enforced on Replica 2 via shared persistence.
+    """
+    # 1. Create user and login on Instance 1
+    signup = client.post(
+        "/users/create",
+        json={"email": "replica_owner@cornell.edu", "password": "ReplicaPass!123"},
+    )
+    assert signup.status_code == 200
+
+    login = client.post(
+        "/users/login",
+        json={"email": "replica_owner@cornell.edu", "password": "ReplicaPass!123"},
+    )
+    assert login.status_code == 200
+    owner_token = login.get_json()["id_token"]
+
+    # 2. Create a course using the session token
+    create_course = client.post(
+        "/courses",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={
+            "name": "Distributed Systems Security",
+            "semester": "FA26",
+            "department": "CS",
+            "instructor": "Prof. Lamport",
+            "section_id": 5412,
+        },
+    )
+    assert create_course.status_code == 201
+    course_id = create_course.get_json()["id"]
+
+    # 3. Second user created and logged in can read the course but receives 403 on update
+    client.post(
+        "/users/create",
+        json={"email": "other_replica_user@cornell.edu", "password": "OtherPass!123"},
+    )
+    other_token = client.post(
+        "/users/login",
+        json={"email": "other_replica_user@cornell.edu", "password": "OtherPass!123"},
+    ).get_json()["id_token"]
+
+    get_resp = client.get(f"/courses/{course_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.get_json()["name"] == "Distributed Systems Security"
+
+    forbidden_update = client.put(
+        f"/courses/{course_id}",
+        headers={"Authorization": f"Bearer {other_token}"},
+        json={"name": "Tampered By Other User"},
+    )
+    assert forbidden_update.status_code == 403
+
