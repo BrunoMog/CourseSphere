@@ -106,21 +106,21 @@ flowchart TD
         Grafana["Grafana Dashboards (:3001)"]
     end
 
-    User -->|HTTPS / HTTP :80| Nginx
-    Attacker -->|Payloads SQLi / Brute-Force / IDOR| Nginx
-    Nginx -->|Rota Estática /| FE
-    Nginx -->|Round-Robin /courses, /users, /chats, /health| BE1
-    Nginx -->|Round-Robin /courses, /users, /chats, /health| BE2
+    User -->|"HTTPS / HTTP :80"| Nginx
+    Attacker -->|"Payloads SQLi / Brute-Force / IDOR"| Nginx
+    Nginx -->|"Rota Estática /"| FE
+    Nginx -->|"Round-Robin /courses, /users, /chats, /health"| BE1
+    Nginx -->|"Round-Robin /courses, /users, /chats, /health"| BE2
     BE1 --> SecMod
     BE2 --> SecMod
     BE1 --> ResMod
     BE2 --> ResMod
-    SecMod -->|Prepared Statements (?)| SQLite
-    ResMod -->|Circuit Breaker + Token Verify| Firebase
-    ResMod -->|Circuit Breaker + Delimited Prompt| OpenAI
-    Prom -->|GET /metrics (5s interval)| BE1
-    Prom -->|GET /metrics (5s interval)| BE2
-    Grafana -->|PromQL Queries| Prom
+    SecMod -->|"Prepared Statements (?)"| SQLite
+    ResMod -->|"Circuit Breaker + Token Verify"| Firebase
+    ResMod -->|"Circuit Breaker + Delimited Prompt"| OpenAI
+    Prom -->|"GET /metrics (5s interval)"| BE1
+    Prom -->|"GET /metrics (5s interval)"| BE2
+    Grafana -->|"PromQL Queries"| Prom
 ```
 
 ### 4.3 Matriz de Modelagem de Ameaças (STRIDE)
