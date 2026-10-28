@@ -1,9 +1,11 @@
-# 🎓 CourseSphere — Plataforma de Recomendação de Cursos
+# 🎓 CourseSphere — Plataforma de Recomendação e Gestão de Cursos
 > **Projeto de Avaliação Técnica — Bolsista de Segurança de Aplicações e Confiabilidade (AppSec / SRE)**
 
-CourseSphere é uma aplicação web composta por frontend em React (Vite/TypeScript) e backend em Python (Flask/SQLite), integrada a serviços de inteligência e autenticação.
+CourseSphere é uma aplicação web composta por frontend em React (Vite/TypeScript) e backend em Python (Flask/SQLite), integrada a serviços de inteligência (OpenAI) e autenticação (Firebase / HMAC Session Tokens).
 
-Este repositório contém a versão auditada e remediada da aplicação, contemplando correção de vulnerabilidades críticas (OWASP Top 10), hardening de segurança, esteira de observabilidade (SRE) com métricas Prometheus, logs estruturados em JSON, conteinerização com Docker e balanceamento de carga via Nginx.
+Este repositório contém a versão auditada, remediada e instrumentada da aplicação na branch `fix/security-and-hardening`, contemplando:
+- **AppSec (OWASP Top 10:2021)**: Remediação completa de 9 vulnerabilidades (`PT-001` a `PT-009`), incluindo Injeção de SQL, Credenciais Hardcoded, RCE/Debug Werkzeug, Quebra de Controle de Acesso (BOLA/IDOR e endpoints não autenticados), Tokens em Query String, Path Traversal, Criptografia Fraca (`scrypt` + HMAC-SHA256), Prompt Injection, CVEs de dependências NPM e ausência de Headers HTTP / Rate Limiting.
+- **SRE & Resiliência**: Instrumentação OpenMetrics/Prometheus (`/metrics` com histogramas de latência), Logs Estruturados em JSON com `request_id` e `actor_uid`, **Circuit Breaker** (`CLOSED`/`OPEN`/`HALF_OPEN`) + **Retry com Backoff Exponencial e Jitter**, Healthcheck ativo (`/health`), **Docker Compose** com Nginx Load Balancer (2 réplicas Gunicorn não-root) e **Manifestos Kubernetes (`k8s/manifests.yaml`)** com HPA, NetworkPolicy e Probes.
 
 ---
 
@@ -15,17 +17,18 @@ Este repositório contém a versão auditada e remediada da aplicação, contemp
                                     ▼ (Porta 80)
                 ┌───────────────────────────────────────┐
                 │        Nginx Reverse Proxy / LB       │
-                │        (Gateway & Load Balancer)      │
+                │   (Gateway, Rate Limit & Headers)     │
                 └───────┬───────────────────────┬───────┘
                         │                       │
          ┌──────────────┴──────────┐            ▼ (Proxy SPA)
          │  upstream backend_pool  │      ┌───────────────┐
          │     (Round-Robin)       │      │   Frontend    │
          └──┬───────────────────┬──┘      │ (React/Vite)  │
-            ▼                   ▼         └───────────────┘
-     ┌─────────────┐     ┌─────────────┐
+            ▼                   ▼         │  (Non-Root)   │
+     ┌─────────────┐     ┌─────────────┐  └───────────────┘
      │  Backend 1  │     │  Backend 2  │
      │  (Gunicorn) │     │  (Gunicorn) │
+     │ +CircuitBrk │     │ +CircuitBrk │
      └──────┬──────┘     └──────┬──────┘
             │                   │
             └─────────┬─────────┘
@@ -48,24 +51,33 @@ Este repositório contém a versão auditada e remediada da aplicação, contemp
 
 ### Pré-requisitos
 - [Docker](https://docs.docker.com/get-docker/) e [Docker Compose](https://docs.docker.com/compose/) instalados;
-- (Opcional para execução local direta) Python 3.11+ e Node.js 20+.
+- (Opcional para execução local de testes e SAST) Python 3.11+ / `uv`.
 
 ### 1. Inicialização Completa via Docker Compose (Recomendado)
-Para subir todos os serviços (Nginx Gateway, 2 réplicas de Backend, Frontend, Prometheus e Grafana):
+Para subir todos os serviços (Nginx Gateway, 2 réplicas de Backend Gunicorn, Frontend React não-root, Prometheus e Grafana):
 
 ```bash
 docker compose up --build -d
 ```
 
-### 2. Endpoints e Portas de Acesso
+### 2. Deploy Opcional em Kubernetes (Diferencial Técnico)
+O repositório inclui manifestos Kubernetes prontos para produção em [`k8s/manifests.yaml`](k8s/manifests.yaml) contendo `Deployment` (3 réplicas, `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `livenessProbe` e `readinessProbe`), `Service`, `HorizontalPodAutoscaler` e `NetworkPolicy`:
 
-| Serviço | URL | Descrição |
+```bash
+kubectl apply -f k8s/manifests.yaml
+```
+
+### 3. Endpoints e Portas de Acesso
+
+| Serviço | URL / Rota | Descrição |
 |---|---|---|
-| **Aplicação Completa (Gateway)** | [http://localhost](http://localhost) | Entrada principal da aplicação via Nginx |
-| **API Backend (Healthcheck)** | [http://localhost/health](http://localhost/health) | Probe de liveness e readiness |
-| **Métricas Prometheus** | [http://localhost/metrics](http://localhost/metrics) | Métricas exportadas em formato OpenMetrics |
-| **Prometheus Server** | [http://localhost:9090](http://localhost:9090) | Coletor de métricas e interface de consulta PromQL |
-| **Dashboard Grafana** | [http://localhost:3001](http://localhost:3001) | Painéis visuais SRE (Login: `admin` / `admin`) |
+| **Aplicação Completa (Gateway)** | `http://localhost` | Entrada principal da aplicação via Nginx |
+| **API Backend (Healthcheck)** | `GET http://localhost/health` | Probe ativo de liveness/readiness (valida DB + Circuit Breakers) |
+| **Métricas Prometheus** | `GET http://localhost/metrics` | Métricas exportadas em formato OpenMetrics (Histogramas, Contadores e Gauges) |
+| **Autenticação com Rate Limit** | `POST http://localhost/users/login` | Login com `scrypt`, emissão de token HMAC com expiração e bloqueio após 5 falhas (`429`) |
+| **CRUD de Cursos (Autorizado)** | `POST / PUT / DELETE /courses` | Criação, edição e remoção de cursos restrita ao `creator_uid` (`403 Forbidden` para terceiros) |
+| **Prometheus Server** | `http://localhost:9090` | Coletor de métricas e interface de consulta PromQL |
+| **Dashboard Grafana** | `http://localhost:3001` | Painéis visuais SRE provisionados automaticamente (`admin` / `admin`) |
 
 ---
 
@@ -77,7 +89,7 @@ Para comprovar que o Nginx está distribuindo as requisições em regime *round-
 python3 scripts/demonstrate_load_balancing.py http://localhost/health 10
 ```
 
-Saída de demonstração esperada:
+Saída esperada:
 ```text
 [*] Dispatching 10 requests to http://localhost/health...
 
@@ -96,12 +108,21 @@ Req #    | Status   | X-Served-By          | X-Upstream-Backend     | Latency (m
 
 ---
 
-## 🧪 Testes Automatizados de Segurança e Regressão
+## 🧪 Suíte de Testes Automatizados de Segurança e Confiabilidade (20 Testes)
 
-Foram criados 12 testes unitários e de integração em `pytest` cobrindo as correções de autorização, injeção de SQL e os endpoints de observabilidade:
+Foram implementados **20 testes automatizados** em `pytest` (`backend/tests/test_courses_security.py` e `backend/tests/test_endpoints_security.py`) cobrindo:
+- Neutralização de SQL Injection em todas as rotas de cursos e migração de dados;
+- Controle de acesso por propriedade de recurso (**BOLA/IDOR**): usuário autenticado tentando editar (`PUT /courses/<id>`) ou excluir (`DELETE /courses/<id>`) curso de outro criador recebe **`HTTP 403 Forbidden`**;
+- Sanitização de payloads XSS (`<script>`) na criação e edição de cursos;
+- Bloqueio de transporte inseguro de token na URL (`?id_token=` -> `HTTP 401`) e exigência de autenticação em `POST /users/query`;
+- **Rate Limiting e Brute-Force Lockout** em `POST /users/login` (`HTTP 429 Too Many Requests` + `Retry-After` após 5 falhas);
+- Expiração criptográfica de tokens HMAC e hashing de senhas com `scrypt`;
+- Bloqueio de **Path Traversal** (`../`) e proteção **CSRF / Origin / Content-Type (`415`)**;
+- Transições de estado do **Circuit Breaker** (`CLOSED -> OPEN -> HALF_OPEN -> CLOSED`) e retry com backoff;
+- Presença de headers de segurança HTTP e métricas Prometheus (`/metrics`).
 
 ```bash
-# Execução via ambiente virtual ou uvx
+export PATH="$HOME/.local/bin:$PATH"
 uvx --with flask --with flask-cors pytest backend/tests/ -v
 ```
 
@@ -109,55 +130,49 @@ uvx --with flask --with flask-cors pytest backend/tests/ -v
 
 ## 🛡️ Ferramentas de Verificação Automatizada (SAST & SCA)
 
-As análises estáticas e de dependências foram executadas e seus relatórios arquivados na pasta `audit_reports/`:
-
-### 1. Bandit (SAST em Python)
+### 1. Bandit (SAST em Python — 0 Issues)
 ```bash
-uvx bandit -r backend/ -ll -ii
+uvx bandit -r backend/ --exclude backend/tests -ll -ii
 ```
 
-### 2. Semgrep (SAST Polyglot)
+### 2. Semgrep (SAST Polyglot — 0 Findings)
 ```bash
-uvx semgrep scan --config=auto backend/
+uvx semgrep scan --config=auto
 ```
 
-### 3. pip-audit (SCA de Dependências)
+### 3. pip-audit (SCA de Dependências Python)
 ```bash
 uvx pip-audit -r backend/requirements.txt
 ```
 
 ---
 
-## 🔍 Como Reproduzir os Achados de Segurança
+## 🔍 Como Reproduzir as Correções dos Achados (`PT-001` a `PT-009`)
 
-### 1. Injeção de SQL (VULN-01) — Neutralizada
-- **Comportamento Anterior**: Concatenação direta de parâmetros em strings SQL (`f"SELECT * FROM courses WHERE semester = '{semester}'"`).
-- **Como reproduzir**:
-  ```bash
-  # Requisição contendo payload de SQL Injection
-  curl -i "http://localhost/courses/semester/'%20OR%201=1--"
-  ```
-- **Resultado Atual**: Retorna HTTP 404 (o payload é tratado estritamente como dado literal pela consulta parametrizada, sem executar lógica SQL arbitrária).
-
-### 2. Vazamento de Token em Parâmetro GET (VULN-04) — Neutralizado
-- **Comportamento Anterior**: Aceitava `GET /users/info?id_token=<JWT>`, registrando tokens em texto claro nos logs do servidor.
-- **Como reproduzir**:
-  ```bash
-  curl -i "http://localhost/users/info?id_token=ey..."
-  ```
-- **Resultado Atual**: Retorna HTTP 401 Unauthorized (`"Insecure token transport: tokens must be transmitted in the Authorization HTTP header, not query parameters."`).
-
-### 3. Desativação do Modo Debug e Stacktrace (VULN-03) — Neutralizado
-- **Comportamento Anterior**: Servidor rodava com `debug=True`, expondo o depurador interativo do Werkzeug e stacktraces detalhados.
-- **Resultado Atual**: `FLASK_DEBUG=0` por padrão; erros internos são capturados pelo handler global e retornam mensagem genérica padronizada sem vazar caminhos de arquivos.
+1. **Injeção de SQL (`PT-001`)**:
+   ```bash
+   curl -i "http://localhost/courses/semester/'%20OR%201=1--"
+   # Retorna HTTP 404 (payload tratado como literal via prepared statements `?`)
+   ```
+2. **Controle de Acesso / BOLA em Cursos (`PT-005`)**:
+   - Criar curso como `user_alice` (`POST /courses`) e tentar atualizar (`PUT /courses/<id>`) com token de `user_bob`:
+   - Retorna **`HTTP 403 Forbidden`** (`"Forbidden: only the course creator can modify this course."`).
+3. **Bloqueio de Força Bruta / Rate Limiting (`PT-009`)**:
+   - Enviar 5 requisições `POST /users/login` com senha incorreta seguidas de uma 6ª tentativa:
+   - Retorna **`HTTP 429 Too Many Requests`** com cabeçalho `Retry-After`.
+4. **Rejeição de Token em Query Parameter (`PT-006`)**:
+   ```bash
+   curl -i "http://localhost/users/info?id_token=ey..."
+   # Retorna HTTP 401 Unauthorized
+   ```
 
 ---
 
 ## 📈 Métricas, SLIs e SLOs (SRE)
 
-- **SLI 1 (Latência de Consulta)**: Percentual de requisições à API atendidas com latência inferior a 200ms.
-  - **SLO 1**: 99.0% das requisições válidas atendidas em `< 200ms` em uma janela de 30 dias.
-- **SLI 2 (Disponibilidade)**: Percentual de requisições com código de resposta diferente de `5xx`.
-  - **SLO 2**: 99.5% de disponibilidade em uma janela de 30 dias.
+- **SLI 1 (Latência de Consulta — Histograma Prometheus)**: Proporção de requisições HTTP atendidas com latência inferior a `200ms` (`coursesphere_http_request_duration_seconds_bucket{le="0.2"}`).
+  - **SLO 1**: **99.0%** das requisições válidas atendidas em `< 200ms` em janela móvel de 30 dias.
+- **SLI 2 (Disponibilidade)**: Proporção de requisições HTTP com status diferente de `5xx`.
+  - **SLO 2**: **99.5%** de disponibilidade em janela móvel de 30 dias.
 
-O painel visual com monitoramento em tempo real dos SLIs está provisionado no **Grafana** em `http://localhost:3001`.
+Consulte o relatório técnico completo em [`REPORT.md`](REPORT.md).

@@ -1,12 +1,11 @@
 import pytest
-import os
 import sys
 from pathlib import Path
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from db import execute_query, create_connection
+from db import create_connection
 from blueprints.courses import courses_bp
 from flask import Flask
 
@@ -26,16 +25,15 @@ def client(app):
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path, monkeypatch):
-    """Use an isolated in-memory or temporary database for testing."""
+    """Use an isolated temporary database for each test."""
     test_db = str(tmp_path / "test_courses.db")
     monkeypatch.setenv("COURSESPHERE_DB_PATH", test_db)
-    # Reinitialize schema
     conn = create_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO courses (id, name, section_id, semester, department, instructor)
-        VALUES (1, 'AppSec 101', 101, 'Fall2026', 'CS', 'Dr. Turing'),
-               (2, 'Data Structures', 102, 'Spring2026', 'CS', 'Dr. Knuth');
+        INSERT INTO courses (id, name, section_id, semester, department, instructor, creator_uid)
+        VALUES (1, 'AppSec 101', 101, 'Fall2026', 'CS', 'Dr. Turing', 'alice'),
+               (2, 'Data Structures', 102, 'Spring2026', 'CS', 'Dr. Knuth', 'bob');
     """)
     cursor.execute("""
         INSERT INTO course_descriptions (id, description)
@@ -75,7 +73,7 @@ def test_sql_injection_union_based(client):
     """
     Verify that UNION-based SQL injection payloads are safely handled.
     """
-    injection_payload = "' UNION SELECT 99, 'Hacked', 0, 'Evil', 'CS', 'Hacker'--"
+    injection_payload = "' UNION SELECT 99, 'Hacked', 0, 'Evil', 'CS', 'Hacker', 'evil'--"
     response = client.get(f"/courses/department/{injection_payload}")
     assert response.status_code == 404
     data = response.get_json()
@@ -87,3 +85,88 @@ def test_query_filter_parameterized(client):
     assert response.status_code == 200
     data = response.get_json()
     assert len(data) == 2
+
+
+def test_create_course_requires_authentication(client):
+    """Unauthenticated users cannot create courses."""
+    response = client.post(
+        "/courses",
+        json={"name": "Cloud Security", "semester": "Fall2026", "department": "CS", "instructor": "Dr. Rivest"},
+    )
+    assert response.status_code == 401
+
+
+def test_course_authorization_owner_vs_other_user(client):
+    """
+    Differential Requirement: Automated test verifying Broken Access Control remediation.
+    User 'bob' CANNOT edit or delete a course created by 'alice' (HTTP 403 Forbidden),
+    whereas 'alice' CAN edit and delete her own course (HTTP 200 OK).
+    """
+    # 1. Alice creates a new course
+    create_resp = client.post(
+        "/courses",
+        headers={"Authorization": "Bearer test-token-alice"},
+        json={
+            "name": "Distributed Systems SRE",
+            "section_id": 305,
+            "semester": "Fall2026",
+            "department": "CS",
+            "instructor": "Dr. Lamport",
+            "description": "Consensus and fault tolerance.",
+        },
+    )
+    assert create_resp.status_code == 201
+    created_course = create_resp.get_json()
+    course_id = created_course["id"]
+    assert created_course["creator_uid"] == "alice"
+
+    # 2. Bob attempts to edit Alice's course -> Must fail with 403 Forbidden
+    bob_edit_resp = client.put(
+        f"/courses/{course_id}",
+        headers={"Authorization": "Bearer test-token-bob"},
+        json={"name": "Tampered Course Title"},
+    )
+    assert bob_edit_resp.status_code == 403
+    assert "permission" in bob_edit_resp.get_json()["error"].lower()
+
+    # 3. Bob attempts to delete Alice's course -> Must fail with 403 Forbidden
+    bob_delete_resp = client.delete(
+        f"/courses/{course_id}",
+        headers={"Authorization": "Bearer test-token-bob"},
+    )
+    assert bob_delete_resp.status_code == 403
+
+    # 4. Alice edits her own course -> Succeeds with 200 OK
+    alice_edit_resp = client.put(
+        f"/courses/{course_id}",
+        headers={"Authorization": "Bearer test-token-alice"},
+        json={"name": "Advanced Distributed Systems SRE"},
+    )
+    assert alice_edit_resp.status_code == 200
+    assert alice_edit_resp.get_json()["name"] == "Advanced Distributed Systems SRE"
+
+    # 5. Alice deletes her own course -> Succeeds with 200 OK
+    alice_delete_resp = client.delete(
+        f"/courses/{course_id}",
+        headers={"Authorization": "Bearer test-token-alice"},
+    )
+    assert alice_delete_resp.status_code == 200
+
+
+def test_course_input_xss_sanitization(client):
+    """Verify HTML/script tags in course payloads are sanitized against Stored XSS."""
+    resp = client.post(
+        "/courses",
+        headers={"Authorization": "Bearer test-token-alice"},
+        json={
+            "name": "<script>alert('xss')</script>Security",
+            "semester": "Fall2026",
+            "department": "CS",
+            "instructor": "Dr. <img src=x onerror=alert(1)>",
+        },
+    )
+    assert resp.status_code == 201
+    body = resp.get_json()
+    assert "<script>" not in body["name"]
+    assert "&lt;script&gt;" in body["name"]
+    assert "<img" not in body["instructor"]
