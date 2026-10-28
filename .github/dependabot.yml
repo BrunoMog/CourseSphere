@@ -1,0 +1,90 @@
+# Configuração do GitHub Dependabot (SCA Contínuo — Item 7 do Desafio Técnico)
+# Monitora vulnerabilidades e atualizações de segurança em todas as camadas do CourseSphere:
+# 1. Dependências Python (Backend Flask - pip)
+# 2. Dependências Node.js (Frontend React/Vite - npm)
+# 3. Imagens Base de Containers (Dockerfiles Backend e Frontend)
+# 4. Workflows de CI/CD (GitHub Actions)
+
+version: 2
+updates:
+  # 1. Backend Python (requirements.txt)
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "security"
+      - "backend"
+    commit-message:
+      prefix: "chore(deps-backend)"
+      include: "scope"
+
+  # 2. Frontend React / TypeScript (package.json / package-lock.json)
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "security"
+      - "frontend"
+    commit-message:
+      prefix: "chore(deps-frontend)"
+      include: "scope"
+
+  # 3. Container Base Image — Backend Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+      - "backend"
+    commit-message:
+      prefix: "chore(docker-backend)"
+
+  # 4. Container Base Image — Frontend Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+      - "frontend"
+    commit-message:
+      prefix: "chore(docker-frontend)"
+
+  # 5. GitHub Actions Workflows (.github/workflows/security.yml)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+      - "security"
+    commit-message:
+      prefix: "ci(actions)"
