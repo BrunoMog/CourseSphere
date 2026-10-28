@@ -22,9 +22,9 @@ RUN groupadd -g 1001 appgroup && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code and ensure permissions
+# Copy source code and ensure permissions on both /app and shared /data directory
 COPY . /app
-RUN chown -R appuser:appgroup /app
+RUN mkdir -p /data && chown -R appuser:appgroup /app /data
 
 # Switch to non-root user
 USER appuser

@@ -1,8 +1,8 @@
 """
 AppSec Hardening Module for CourseSphere:
-- Rate Limiting & Brute-Force Account/IP Lockout (CWE-307 / CWE-770)
+- Shared Multi-Worker / Multi-Replica Rate Limiting & Brute-Force Lockout (CWE-307 / CWE-770)
 - Memory-Hard Password Hashing with scrypt & Constant-Time Verification (CWE-916)
-- Signed Session Tokens with Expiration (JWT-like HMAC-SHA256 with exp claim)
+- Signed Session Tokens with Expiration (JWT-like HMAC-SHA256 with exp claim, zero hardcoded secrets)
 - Consistent Input Validation & HTML/XSS Sanitization (CWE-20 / CWE-79)
 - CSRF & Origin/Content-Type Verification for State-Changing Routes (CWE-352)
 """
@@ -19,20 +19,62 @@ import secrets
 from threading import Lock
 from typing import Tuple, Optional, Dict, Any
 
-SECRET_KEY = os.environ.get(
-    "COURSESPHERE_SECRET_KEY",
-    "coursesphere-default-dev-secret-key-change-in-prod"
-)
+try:
+    from backend.db import create_connection
+except ImportError:
+    from db import create_connection
 
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+_FALLBACK_EPHEMERAL_SECRET = secrets.token_hex(32)
+
+
+def get_secret_key() -> str:
+    """
+    Retrieves the cryptographic signing secret from the environment (`COURSESPHERE_SECRET_KEY`).
+    - In production (`COURSESPHERE_ENV=production` or `FLASK_ENV=production`), fails closed if unset.
+    - In local dev/test without an env var, generates a CSPRNG ephemeral key stored in `app_config`
+      so multiple local workers share the same dynamic secret without any hardcoded secret in source code.
+    """
+    env_key = os.environ.get("COURSESPHERE_SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    env_mode = (os.environ.get("COURSESPHERE_ENV") or os.environ.get("FLASK_ENV") or "").lower()
+    if env_mode == "production":
+        raise RuntimeError(
+            "CRITICAL: COURSESPHERE_SECRET_KEY environment variable must be configured in production."
+        )
+
+    try:
+        conn = create_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM app_config WHERE key = ?", ("ephemeral_secret_key",))
+            row = cur.fetchone()
+            if row and row["value"]:
+                return str(row["value"])
+            generated = secrets.token_hex(32)
+            cur.execute(
+                "INSERT OR IGNORE INTO app_config (key, value) VALUES (?, ?)",
+                ("ephemeral_secret_key", generated),
+            )
+            conn.commit()
+            cur.execute("SELECT value FROM app_config WHERE key = ?", ("ephemeral_secret_key",))
+            row = cur.fetchone()
+            return str(row["value"]) if row else generated
+        finally:
+            conn.close()
+    except Exception:
+        return _FALLBACK_EPHEMERAL_SECRET
 
 
 # ---------------------------------------------------------
-# 1. Rate Limiter & Brute-Force Lockout
+# 1. Shared Rate Limiter & Brute-Force Lockout
 # ---------------------------------------------------------
 class RateLimiter:
     """
-    Thread-safe sliding window rate limiter and failed-authentication lockout manager.
+    Multi-process / multi-replica sliding window rate limiter and failed-authentication
+    lockout manager backed by the shared database (with thread-safe fallback).
     """
     def __init__(
         self,
@@ -45,64 +87,129 @@ class RateLimiter:
         self.window_seconds = window_seconds
         self.max_failed_auth = max_failed_auth
         self.lockout_seconds = lockout_seconds
-        self._requests: Dict[str, list] = {}
-        self._failed_auth: Dict[str, list] = {}
-        self._lockouts: Dict[str, float] = {}
         self._lock = Lock()
 
     def is_locked_out(self, identifier: str) -> Tuple[bool, int]:
-        """Checks if an IP or account identifier is currently locked out due to brute force."""
+        """Checks if an IP or account identifier is currently locked out across any replica."""
         now = time.time()
         with self._lock:
-            unlock_time = self._lockouts.get(identifier, 0.0)
-            if unlock_time > now:
-                return True, int(unlock_time - now) + 1
-            if identifier in self._lockouts:
-                del self._lockouts[identifier]
-        return False, 0
+            conn = create_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT locked_until FROM auth_lockouts WHERE client_key = ?",
+                    (identifier,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False, 0
+                unlock_time = float(row["locked_until"] or 0.0)
+                if unlock_time > now:
+                    return True, int(unlock_time - now) + 1
+                if unlock_time > 0.0 and unlock_time <= now:
+                    cur.execute("DELETE FROM auth_lockouts WHERE client_key = ?", (identifier,))
+                    conn.commit()
+                return False, 0
+            finally:
+                conn.close()
 
     def record_auth_failure(self, identifier: str) -> Tuple[bool, int]:
-        """Records a failed authentication attempt and triggers lockout if threshold exceeded."""
+        """Records a failed authentication attempt in the shared store and triggers lockout if exceeded."""
         now = time.time()
         with self._lock:
-            attempts = [t for t in self._failed_auth.get(identifier, []) if now - t < self.window_seconds]
-            attempts.append(now)
-            self._failed_auth[identifier] = attempts
-            if len(attempts) >= self.max_failed_auth:
-                unlock_time = now + self.lockout_seconds
-                self._lockouts[identifier] = unlock_time
-                return True, self.lockout_seconds
-        return False, 0
+            conn = create_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT fail_count, window_start, locked_until FROM auth_lockouts WHERE client_key = ?",
+                    (identifier,),
+                )
+                row = cur.fetchone()
+                if not row or (now - float(row["window_start"] or 0.0)) >= self.window_seconds:
+                    fail_count = 1
+                    window_start = now
+                else:
+                    fail_count = int(row["fail_count"] or 0) + 1
+                    window_start = float(row["window_start"])
+
+                locked_until = 0.0
+                is_locked = False
+                if fail_count >= self.max_failed_auth:
+                    locked_until = now + self.lockout_seconds
+                    is_locked = True
+
+                cur.execute(
+                    """
+                    INSERT INTO auth_lockouts (client_key, fail_count, window_start, locked_until)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(client_key) DO UPDATE SET
+                        fail_count = excluded.fail_count,
+                        window_start = excluded.window_start,
+                        locked_until = excluded.locked_until
+                    """,
+                    (identifier, fail_count, window_start, locked_until),
+                )
+                conn.commit()
+                return is_locked, (self.lockout_seconds if is_locked else 0)
+            finally:
+                conn.close()
 
     def clear_auth_failures(self, identifier: str):
         with self._lock:
-            self._failed_auth.pop(identifier, None)
-            self._lockouts.pop(identifier, None)
+            conn = create_connection()
+            try:
+                conn.execute("DELETE FROM auth_lockouts WHERE client_key = ?", (identifier,))
+                conn.commit()
+            finally:
+                conn.close()
 
     def check_rate_limit(self, key: str, limit: Optional[int] = None) -> Tuple[bool, int, int]:
         """
-        Checks whether `key` is within the allowed request rate.
+        Checks whether `key` is within the allowed request rate across all workers/replicas.
         Returns (allowed: bool, remaining: int, retry_after: int).
         """
         max_reqs = limit or self.default_limit
         now = time.time()
+        cutoff = now - self.window_seconds
         with self._lock:
-            history = [t for t in self._requests.get(key, []) if now - t < self.window_seconds]
-            if len(history) >= max_reqs:
-                oldest = history[0]
-                retry_after = max(1, int(self.window_seconds - (now - oldest)))
-                self._requests[key] = history
-                return False, 0, retry_after
-            history.append(now)
-            self._requests[key] = history
-            remaining = max(0, max_reqs - len(history))
-            return True, remaining, 0
+            conn = create_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "DELETE FROM rate_limit_events WHERE bucket_key = ? AND ts <= ?",
+                    (key, cutoff),
+                )
+                cur.execute(
+                    "SELECT COUNT(*), MIN(ts) FROM rate_limit_events WHERE bucket_key = ?",
+                    (key,),
+                )
+                row = cur.fetchone()
+                count = int(row[0] or 0)
+                oldest = float(row[1] or now)
+                if count >= max_reqs:
+                    conn.commit()
+                    retry_after = max(1, int(self.window_seconds - (now - oldest)))
+                    return False, 0, retry_after
+
+                cur.execute(
+                    "INSERT INTO rate_limit_events (bucket_key, ts) VALUES (?, ?)",
+                    (key, now),
+                )
+                conn.commit()
+                remaining = max(0, max_reqs - (count + 1))
+                return True, remaining, 0
+            finally:
+                conn.close()
 
     def reset(self):
         with self._lock:
-            self._requests.clear()
-            self._failed_auth.clear()
-            self._lockouts.clear()
+            conn = create_connection()
+            try:
+                conn.execute("DELETE FROM rate_limit_events;")
+                conn.execute("DELETE FROM auth_lockouts;")
+                conn.commit()
+            finally:
+                conn.close()
 
 
 rate_limiter = RateLimiter(
@@ -159,6 +266,7 @@ def create_session_token(uid: str, ttl_seconds: int = 3600) -> str:
     """
     Generates an HMAC-SHA256 signed token with an explicit expiration timestamp (`exp`).
     """
+    secret_key = get_secret_key()
     now = int(time.time())
     payload = {
         "uid": uid,
@@ -167,7 +275,7 @@ def create_session_token(uid: str, ttl_seconds: int = 3600) -> str:
         "jti": secrets.token_hex(8),
     }
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8").rstrip("=")
-    sig = hmac.new(SECRET_KEY.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+    sig = hmac.new(secret_key.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"csjwt.{payload_b64}.{sig}"
 
 
@@ -181,7 +289,8 @@ def verify_session_token(token: str) -> Dict[str, Any]:
     if len(parts) != 3:
         raise ValueError("Malformed session token.")
     _, payload_b64, sig = parts
-    expected_sig = hmac.new(SECRET_KEY.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+    secret_key = get_secret_key()
+    expected_sig = hmac.new(secret_key.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig, expected_sig):
         raise ValueError("Invalid token signature.")
     padding = "=" * (-len(payload_b64) % 4)
