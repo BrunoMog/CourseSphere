@@ -1,7 +1,7 @@
 {
   "name": "coursesphere",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,13 +16,13 @@
     "@fontsource/roboto": "^5.0.13",
     "@mui/icons-material": "^5.16.0",
     "@mui/material": "^5.16.0",
-    "firebase": "^10.12.3",
+    "firebase": "^10.14.1",
     "framer-motion": "^11.2.13",
     "jquery": "^3.7.1",
     "react": "^18.3.1",
     "react-card-flip": "^1.2.3",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.24.1",
+    "react-router-dom": "^6.28.0",
     "react-toastify": "^10.0.5",
     "sass": "^1.77.6",
     "uuid": "^10.0.0"
@@ -36,7 +36,13 @@
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.2",
     "eslint-plugin-react-refresh": "^0.4.7",
-    "typescript": "^5.2.2",
-    "vite": "^5.3.1"
+    "typescript": "^5.5.4",
+    "vite": "^5.4.11"
+  },
+  "overrides": {
+    "rollup": "^4.22.4",
+    "cross-spawn": "^7.0.5",
+    "micromatch": "^4.0.8",
+    "@remix-run/router": "^1.21.0"
   }
 }

@@ -3,6 +3,7 @@ import json
 import hmac
 import hashlib
 import secrets
+import logging
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -33,8 +34,8 @@ def get_openai_client():
             with open(config_path, "r") as f:
                 config = json.load(f)
                 api_key = config.get("openai_api_key")
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Optional config.json not loaded: %s", exc)
             
     if not api_key:
         return None
@@ -53,8 +54,8 @@ def get_query_types():
         try:
             with open(path, "r") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Optional config.json not loaded: %s", exc)
     return {}
 
 
