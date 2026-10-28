@@ -5,10 +5,10 @@ from typing import List, Optional, Dict, Any
 
 try:
     from backend.security import sanitize_string
-    from backend.main import get_openai_client, get_query_types
+    from backend.main import get_openai_client, get_query_types, validate_query_parameters
 except ImportError:
     from security import sanitize_string
-    from main import get_openai_client, get_query_types
+    from main import get_openai_client, get_query_types, validate_query_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +105,12 @@ class QueryManager:
                 content = completion.choices[0].message.content or "{}"
                 parsed = json.loads(content)
                 if isinstance(parsed, dict) and parsed.get("query_type") in allowed_types:
+                    qtype = parsed["query_type"]
                     return {
-                        "query_type": parsed["query_type"],
-                        "parameters": parsed.get("parameters") if isinstance(parsed.get("parameters"), dict) else {},
+                        "query_type": qtype,
+                        "parameters": validate_query_parameters(
+                            qtype, parsed.get("parameters"), self.query_types_dict
+                        ),
                     }
                 return {"query_type": "unsupported", "parameters": {}}
             except Exception as exc:

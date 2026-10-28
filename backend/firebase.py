@@ -188,8 +188,10 @@ class Firebase:
         try:
             decoded_token = auth.verify_id_token(token_str)
             return decoded_token
+        except (ConnectionError, TimeoutError, OSError) as net_err:
+            raise ConnectionError(f"Firebase verification service unreachable: {net_err}") from net_err
         except Exception as e:
-            raise Exception(f"Error verifying ID token: {str(e)}")
+            raise ValueError(f"Invalid or expired Firebase ID token: {str(e)}") from e
 
     @staticmethod
     def set_user_info(uid: str, user_info: dict):

@@ -108,9 +108,9 @@ Req #    | Status   | X-Served-By          | X-Upstream-Backend     | Latency (m
 
 ---
 
-## 🧪 Suíte de Testes Automatizados de Segurança e Confiabilidade (28 Testes)
+## 🧪 Suíte de Testes Automatizados de Segurança e Confiabilidade (29 Testes)
 
-Foram implementados **28 testes automatizados** em `pytest` (`backend/tests/test_courses_security.py` e `backend/tests/test_endpoints_security.py`) cobrindo:
+Foram implementados **29 testes automatizados** em `pytest` (`backend/tests/test_courses_security.py` e `backend/tests/test_endpoints_security.py`) cobrindo:
 - Neutralização de SQL Injection em todas as rotas de cursos e migração de dados;
 - Controle de acesso por propriedade de recurso (**BOLA/IDOR**): usuário autenticado tentando editar (`PUT /courses/<id>`) ou excluir (`DELETE /courses/<id>`) curso de outro criador recebe **`HTTP 403 Forbidden`**;
 - Prevenção de **Account Takeover (`CWE-620`)**: recadastro de e-mail existente em `POST /users/create` é bloqueado com **`HTTP 409 Conflict`** sem sobrescrever a senha original;

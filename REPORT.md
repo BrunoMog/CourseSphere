@@ -28,9 +28,9 @@ A avaliação combinou análise estática automatizada (**SAST** com Bandit e Se
 | Indicador de Segurança e Confiabilidade | Estado Inicial (`main`) | Estado Pós-Intervenção (`fix/security-and-hardening`) |
 |---|---|---|
 | **Vulnerabilidades Reais Documentadas** | **9 vulnerabilidades** (1 Crítica, 4 Altas, 4 Médias) | **100% Remediadas / Mitigadas na Causa Raiz** |
-| **Alertas SAST — Bandit (Backend Python)** | **20 alertas** (1 High, 15 Medium, 4 Low) | **0 alertas** (0 High, 0 Medium, 0 Low em 2.377 LOC) |
+| **Alertas SAST — Bandit (Backend Python)** | **20 alertas** (1 High, 15 Medium, 4 Low) | **0 alertas** (0 High, 0 Medium, 0 Low em 2.404 LOC) |
 | **Alertas SAST — Semgrep (Full-Stack & IaC)** | **24 achados bloqueantes** | **0 achados bloqueantes** |
-| **Suíte de Testes Automatizados de Segurança** | **0 testes** | **28 testes automatizados (`pytest`) — 100% Passing** |
+| **Suíte de Testes Automatizados de Segurança** | **0 testes** | **29 testes automatizados (`pytest`) — 100% Passing** |
 | **Postura de Containers e Estado entre Réplicas** | Apenas frontend em `node:16` rodando como `root` | Multi-stage builds **non-root** + Nginx LB (2 réplicas com **volume SQLite WAL compartilhado**) + Manifestos **K8s** |
 | **Observabilidade e Resiliência SRE** | Inexistente (`print` statements e erros brutos) | Logs JSON + `/health` + `/metrics` (agregado entre workers e baixa cardinalidade) + **Circuit Breaker** |
 
@@ -314,6 +314,7 @@ Comprometimento imediato de credenciais de integração com APIs de terceiros e 
 
 #### Causa Raiz e Solução Implementada (Commit `dbaa49b` e revisão de segredos)
 Remoção dos valores sensíveis, criação de [`.env.example`](.env.example) documentando todas as variáveis de ambiente e refatoração de [`reddit_crawler.py`](backend/cornell-course-sphere-data/reddit-data/reddit_crawler.py), [`firebaseConfig.ts`](frontend/src/firebaseConfig.ts), [`backend/security.py`](backend/security.py) e [`docker-compose.yml`](docker-compose.yml). A função `get_secret_key()` em [`backend/security.py`](backend/security.py) falha de forma segura (*fail-closed* com `RuntimeError`, validado por `test_production_mode_fails_without_secret_key`) caso `COURSESPHERE_SECRET_KEY` não esteja definida em produção (`COURSESPHERE_ENV=production`), e em modo de desenvolvimento sincroniza uma chave efêmera gerada via CSPRNG (`secrets.token_hex(32)`) na tabela compartilhada `app_config` sem nenhuma string estática no código.
+> **Nota de Resposta a Incidentes (Histórico Git)**: Como a branch `main` original é mantida inalterada para fins de avaliação comparativa do desafio técnico, em um ambiente real de produção qualquer credencial historicamente versionada no Git (`reddit_key.json`) deve ser **imediatamente revogada e rotacionada** no console do provedor (Reddit API / Firebase Console), pois a remoção em novos commits não apaga objetos em commits anteriores.
 
 ---
 
@@ -439,7 +440,7 @@ No commit original (`main: 71616a0`):
 
 #### Solução Implementada
 1. **Separação Estrutural de Papéis (`system` / `user`) e Delimitadores `<user_query>`**: Em [`backend/main.py`](backend/main.py) e [`backend/query_manager.py`](backend/query_manager.py), a integração com a OpenAI foi migrada para `client.chat.completions.create` com mensagem `role: "system"` isolada das entradas não confiáveis delimitadas por `<user_query>...</user_query>`.
-2. **Validação Estrita da Saída do Modelo (*Output Allowlist Validation*)**: A resposta JSON do modelo é validada contra o conjunto de `allowed_types` permitido (`course_search`, `general`, `unsupported`); qualquer tentativa de injeção que altere a estrutura do JSON ou invente um `query_type` não autorizado é descartada com fallback seguro para `unsupported`. Quando `OPENAI_API_KEY` não está configurada (ex.: ambiente de testes offline), `QueryManager` opera de forma determinística local sem falhar.
+2. **Validação Estrita da Saída do Modelo (*Output Allowlist Validation*)**: A resposta JSON do modelo é validada contra o conjunto de `allowed_types` permitido (`course_search`, `general`, `unsupported`) e o dicionário `parameters` passa por `validate_query_parameters()`, que filtra apenas chaves previstas no schema (`query_types.json`) e sanitiza valores escalares (`sanitize_string`); qualquer tentativa de injeção que altere a estrutura do JSON ou invente um `query_type` não autorizado é descartada com fallback seguro para `unsupported`. Quando `OPENAI_API_KEY` não está configurada (ex.: ambiente de testes offline), `QueryManager` opera de forma determinística local sem falhar.
 3. **Sanitização de Entrada e Remoção de Reflexão**: Aplicação de `sanitize_string()` (`html.escape` + limite de 1.000 caracteres) e remoção da reflexão bruta no `catch` de [`frontend/src/api.ts`](frontend/src/api.ts).
 
 ---
@@ -605,7 +606,7 @@ A priorização abaixo combina **Severidade (Impacto de Negócio)** $\times$ **E
   Test results:
       No issues identified.
   Code scanned:
-      Total lines of code: 2377
+      Total lines of code: 2404
       Total lines skipped (#nosec): 0
   Run metrics:
       Total issues (by severity): High: 0, Medium: 0, Low: 0
@@ -615,51 +616,52 @@ A priorização abaixo combina **Severidade (Impacto de Negócio)** $\times$ **E
 Arquivo de execução: [`backend/tests/test_courses_security.py`](backend/tests/test_courses_security.py) e [`backend/tests/test_endpoints_security.py`](backend/tests/test_endpoints_security.py):
 ```text
 ============================= test session starts ==============================
-collected 28 items
+collected 29 items
 
 backend/tests/test_courses_security.py::test_get_course_valid PASSED     [  3%]
-backend/tests/test_courses_security.py::test_get_course_not_found PASSED [  7%]
+backend/tests/test_courses_security.py::test_get_course_not_found PASSED [  6%]
 backend/tests/test_courses_security.py::test_sql_injection_in_semester_parameter PASSED [ 10%]
-backend/tests/test_courses_security.py::test_sql_injection_union_based PASSED [ 14%]
+backend/tests/test_courses_security.py::test_sql_injection_union_based PASSED [ 13%]
 backend/tests/test_courses_security.py::test_query_filter_parameterized PASSED [ 17%]
-backend/tests/test_courses_security.py::test_create_course_requires_authentication PASSED [ 21%]
-backend/tests/test_courses_security.py::test_course_authorization_owner_vs_other_user PASSED [ 25%]
-backend/tests/test_courses_security.py::test_course_input_xss_sanitization PASSED [ 28%]
-backend/tests/test_endpoints_security.py::test_health_endpoint PASSED    [ 32%]
-backend/tests/test_endpoints_security.py::test_metrics_endpoint PASSED   [ 35%]
-backend/tests/test_endpoints_security.py::test_metrics_route_pattern_bounded_cardinality PASSED [ 39%]
-backend/tests/test_endpoints_security.py::test_security_headers_present PASSED [ 42%]
-backend/tests/test_endpoints_security.py::test_token_in_url_rejected PASSED [ 46%]
-backend/tests/test_endpoints_security.py::test_body_id_token_rejected_without_authorization_header PASSED [ 50%]
-backend/tests/test_endpoints_security.py::test_missing_auth_header_rejected PASSED [ 53%]
-backend/tests/test_endpoints_security.py::test_forged_test_tokens_rejected_with_401 PASSED [ 57%]
-backend/tests/test_endpoints_security.py::test_duplicate_signup_rejected_with_409_preventing_account_takeover PASSED [ 60%]
-backend/tests/test_endpoints_security.py::test_valid_bearer_token_accepted PASSED [ 64%]
-backend/tests/test_endpoints_security.py::test_hash_endpoint_with_valid_bearer PASSED [ 67%]
-backend/tests/test_endpoints_security.py::test_chat_path_traversal_blocked PASSED [ 71%]
-backend/tests/test_endpoints_security.py::test_scrypt_password_hashing_and_session_token_lifecycle PASSED [ 75%]
-backend/tests/test_endpoints_security.py::test_production_mode_fails_without_secret_key PASSED [ 78%]
-backend/tests/test_endpoints_security.py::test_trusted_proxy_cidr_validation PASSED [ 82%]
-backend/tests/test_endpoints_security.py::test_brute_force_lockout_on_failed_logins PASSED [ 85%]
-backend/tests/test_endpoints_security.py::test_rate_limit_cannot_be_bypassed_via_x_forwarded_for_spoofing PASSED [ 89%]
-backend/tests/test_endpoints_security.py::test_csrf_and_content_type_protection PASSED [ 92%]
-backend/tests/test_endpoints_security.py::test_circuit_breaker_state_transitions PASSED [ 96%]
-backend/tests/test_endpoints_security.py::test_multi_replica_shared_state_consistency PASSED [100%]
+backend/tests/test_courses_security.py::test_create_course_requires_authentication PASSED [ 20%]
+backend/tests/test_courses_security.py::test_course_authorization_owner_vs_other_user PASSED [ 24%]
+backend/tests/test_courses_security.py::test_course_input_xss_sanitization PASSED [ 27%]
+backend/tests/test_endpoints_security.py::test_health_endpoint PASSED    [ 31%]
+backend/tests/test_endpoints_security.py::test_metrics_endpoint PASSED   [ 34%]
+backend/tests/test_endpoints_security.py::test_metrics_route_pattern_bounded_cardinality PASSED [ 37%]
+backend/tests/test_endpoints_security.py::test_security_headers_present PASSED [ 41%]
+backend/tests/test_endpoints_security.py::test_token_in_url_rejected PASSED [ 44%]
+backend/tests/test_endpoints_security.py::test_body_id_token_rejected_without_authorization_header PASSED [ 48%]
+backend/tests/test_endpoints_security.py::test_missing_auth_header_rejected PASSED [ 51%]
+backend/tests/test_endpoints_security.py::test_forged_test_tokens_rejected_with_401 PASSED [ 55%]
+backend/tests/test_endpoints_security.py::test_duplicate_signup_rejected_with_409_preventing_account_takeover PASSED [ 58%]
+backend/tests/test_endpoints_security.py::test_valid_bearer_token_accepted PASSED [ 62%]
+backend/tests/test_endpoints_security.py::test_hash_endpoint_with_valid_bearer PASSED [ 65%]
+backend/tests/test_endpoints_security.py::test_chat_path_traversal_blocked PASSED [ 68%]
+backend/tests/test_endpoints_security.py::test_scrypt_password_hashing_and_session_token_lifecycle PASSED [ 72%]
+backend/tests/test_endpoints_security.py::test_production_mode_fails_without_secret_key PASSED [ 75%]
+backend/tests/test_endpoints_security.py::test_trusted_proxy_cidr_validation PASSED [ 79%]
+backend/tests/test_endpoints_security.py::test_brute_force_lockout_on_failed_logins PASSED [ 82%]
+backend/tests/test_endpoints_security.py::test_rate_limit_cannot_be_bypassed_via_x_forwarded_for_spoofing PASSED [ 86%]
+backend/tests/test_endpoints_security.py::test_csrf_and_content_type_protection PASSED [ 89%]
+backend/tests/test_endpoints_security.py::test_circuit_breaker_state_transitions PASSED [ 93%]
+backend/tests/test_endpoints_security.py::test_multi_replica_shared_state_consistency PASSED [ 96%]
+backend/tests/test_endpoints_security.py::test_firebase_mode_invalid_tokens_and_signup_login_coherence PASSED [100%]
 
-============================== 28 passed in 2.21s ==============================
+============================== 29 passed in 2.23s ==============================
 ```
 
 ### Apêndice C — Resultado do SAST Semgrep & SCA Contínuo (Dependabot)
 - **Antes da Remediação** ([`audit_reports/semgrep_report.json`](audit_reports/semgrep_report.json)): **24 achados bloqueantes** (incluindo `formatted-sql-query`, `flask-wtf-csrf-disabled`, `dockerfile.security.missing-user`, `github-actions-mutable-action-tag`).
-- **Após a Remediação** ([`audit_reports/semgrep_post_fix_report.json`](audit_reports/semgrep_post_fix_report.json)): **0 findings em 333 regras e 51 arquivos analisados**.
-- **Automação de SCA Contínuo (Dependabot)**: Configurado em [`.github/dependabot.yml`](.github/dependabot.yml) para varredura semanal automática de vulnerabilidades nos ecossistemas `pip`, `npm`, `docker` e `github-actions`.
+- **Após a Remediação** ([`audit_reports/semgrep_post_fix_report.json`](audit_reports/semgrep_post_fix_report.json)): **0 findings em 520 regras e 138 arquivos analisados**.
+- **Automação de SCA Contínuo (Dependabot)**: Configurado em [`.github/dependabot.yml`](.github/dependabot.yml) (com janelas `cooldown: default-days: 7`) para varredura semanal automática de vulnerabilidades nos ecossistemas `pip`, `npm`, `docker` e `github-actions`.
 
 ### Apêndice D — Mapa Completo de Endpoints da Aplicação (`Application Sitemap` — Template Web-App)
 
 | Método HTTP | Rota / Endpoint | Autenticação Exigida | Controle de Autorização / Segurança Aplicado |
 |---|---|---|---|
-| `GET` | `/health` | Pública (Probe SRE) | Valida conectividade SQLite (`SELECT 1`) + estado dos Circuit Breakers (`200` / `503`). |
-| `GET` | `/metrics` | Interna (Scraper Prometheus) | Exporta métricas OpenMetrics (Histogramas de latência, contadores HTTP, auth e Circuit Breaker). |
+| `GET` | `/health` | Pública (Probe SRE / Requisito 4) | Valida conectividade SQLite (`SELECT 1`) + estado dos Circuit Breakers (`200` / `503`). |
+| `GET` | `/metrics` | Pública na Demo / Scraper Prometheus (Requisito 4) | Exporta métricas OpenMetrics agregadas com baixa cardinalidade (em nuvem, recomenda-se ACL de IP interno no Ingress). |
 | `GET` | `/courses/<int:course_id>` | Pública | Consulta parametrizada (`?`) contra SQL Injection. |
 | `GET` | `/courses/semester/<semester>` | Pública | Consulta parametrizada (`?`) contra SQL Injection. |
 | `GET` | `/courses/department/<dept>` | Pública | Consulta parametrizada (`?`) contra SQL Injection. |
