@@ -13,6 +13,7 @@ services:
       - PORT=5000
       - COURSESPHERE_DB_PATH=/data/roster_reviews.sqlite.db
       - SEED_SHARED_DB=1
+      - COURSESPHERE_ENV=${COURSESPHERE_ENV:-development}
       - COURSESPHERE_SECRET_KEY=${COURSESPHERE_SECRET_KEY:-}
       - TRUST_PROXY_HEADERS=1
       - ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://127.0.0.1,http://127.0.0.1:80
@@ -36,6 +37,7 @@ services:
       - PORT=5000
       - COURSESPHERE_DB_PATH=/data/roster_reviews.sqlite.db
       - SEED_SHARED_DB=1
+      - COURSESPHERE_ENV=${COURSESPHERE_ENV:-development}
       - COURSESPHERE_SECRET_KEY=${COURSESPHERE_SECRET_KEY:-}
       - TRUST_PROXY_HEADERS=1
       - ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://127.0.0.1,http://127.0.0.1:80

@@ -3,13 +3,14 @@ import time
 import json
 import uuid
 import logging
+import ipaddress
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 
 try:
     from backend.db import create_connection
     from backend.main import hashFunction
-    from backend.firebase import Firebase
+    from backend.firebase import Firebase, UserAlreadyExistsError
     from backend.security import (
         rate_limiter,
         sanitize_string,
@@ -21,7 +22,7 @@ try:
 except ImportError:
     from db import create_connection
     from main import hashFunction
-    from firebase import Firebase
+    from firebase import Firebase, UserAlreadyExistsError
     from security import (
         rate_limiter,
         sanitize_string,
@@ -69,6 +70,9 @@ logger.setLevel(logging.INFO)
 app = Flask(__name__)
 INSTANCE_ID = os.environ.get("INSTANCE_ID", "backend-standalone")
 
+# Hardening: Enforce maximum HTTP request payload size (1 MB default) against memory exhaustion DoS (CWE-400)
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", 1024 * 1024))
+
 # Security Hardening: Restrict CORS origins instead of wildcard '*'
 ALLOWED_ORIGINS = [
     o.strip()
@@ -84,6 +88,8 @@ CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=True)
 app.register_blueprint(courses_bp)
 
 HISTOGRAM_BUCKETS = (0.01, 0.05, 0.1, 0.2, 0.5, 1.0, float("inf"))
+
+DEFAULT_TRUSTED_CIDRS = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128"
 
 
 def _increment_shared_metric(metric_key: str, delta: float = 1.0):
@@ -126,17 +132,37 @@ error_response = lambda error, code: (jsonify({"error": error}), code)
 
 
 def _is_trusted_proxy(remote_addr: str) -> bool:
-    """Checks whether the immediate peer IP belongs to a configured trusted reverse proxy."""
+    """
+    Validates whether the immediate peer IP belongs to a configured trusted reverse proxy
+    using strict CIDR subnet parsing (RFC 1918 / loopback).
+    """
     if os.environ.get("TRUST_PROXY_HEADERS", "0").lower() not in ("1", "true"):
         return False
-    trusted_prefixes = ("127.", "10.", "172.", "192.168.", "::1")
-    return bool(remote_addr and remote_addr.startswith(trusted_prefixes))
+    if not remote_addr:
+        return False
+    try:
+        peer_ip = ipaddress.ip_address(remote_addr.strip())
+    except ValueError:
+        return False
+
+    cidr_list = os.environ.get("TRUSTED_PROXY_CIDRS", DEFAULT_TRUSTED_CIDRS).split(",")
+    for cidr_str in cidr_list:
+        cidr_str = cidr_str.strip()
+        if not cidr_str:
+            continue
+        try:
+            network = ipaddress.ip_network(cidr_str, strict=False)
+            if peer_ip in network:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _get_client_ip() -> str:
     """
     Resolves the client IP safely without allowing X-Forwarded-For spoofing (CWE-290 / CWE-307).
-    - Ignores X-Forwarded-For / X-Real-IP unless `TRUST_PROXY_HEADERS=1` and the immediate peer is a trusted proxy.
+    - Ignores X-Forwarded-For / X-Real-IP unless `TRUST_PROXY_HEADERS=1` and the immediate peer is in TRUSTED_PROXY_CIDRS.
     - When behind a trusted proxy (e.g., Nginx gateway), uses `X-Real-IP` or the rightmost proxy hop.
     """
     remote_addr = request.remote_addr or "127.0.0.1"
@@ -329,7 +355,7 @@ def metrics():
 def get_auth_token():
     """
     Extracts Bearer token strictly from the Authorization header (RFC 6750).
-    Rejects tokens passed via URL query strings to avoid access log leakage (CWE-598).
+    Rejects tokens passed via URL query strings or request bodies (CWE-598).
     """
     if "id_token" in request.args:
         _increment_shared_metric("auth_events_total:failure", 1.0)
@@ -394,6 +420,10 @@ def create_user():
         _increment_shared_metric("auth_events_total:success", 1.0)
         logger.info(f"User created successfully: {email}", extra={"event_type": "user_created"})
         return success_response(user_result, 200)
+    except UserAlreadyExistsError as e:
+        _increment_shared_metric("auth_events_total:failure", 1.0)
+        logger.warning(f"Duplicate registration blocked for {email}: {e}", extra={"event_type": "duplicate_signup_blocked"})
+        return error_response("An account with this email already exists.", 409)
     except Exception as e:
         _increment_shared_metric("auth_events_total:failure", 1.0)
         logger.warning(f"User creation failed: {e}", extra={"event_type": "auth_failure"})
@@ -404,28 +434,40 @@ def create_user():
 def login_user():
     """
     Authenticates user credentials using scrypt password hashing and issues an
-    expiring HMAC-SHA256 session token. Protected by brute-force lockout.
+    expiring HMAC-SHA256 session token. Protected by IP and account-level brute-force lockout.
     """
     client_ip = _get_client_ip()
     data = request.get_json(silent=True) or {}
-    email = str(data.get("email", "")).strip()
+    email = str(data.get("email", "")).strip().lower()
     password = str(data.get("password", "")).strip()
 
     if not email or not password:
         return error_response("Email and password are required", 400)
 
+    account_key = f"acct:{email}"
+    acct_locked, acct_retry = rate_limiter.is_locked_out(account_key)
+    if acct_locked:
+        _increment_shared_metric("auth_events_total:lockout", 1.0)
+        resp = jsonify({"error": "Account temporarily locked due to repeated failed login attempts."})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(acct_retry)
+        return resp
+
     try:
         auth_result = Firebase.authenticate_user(email, password)
         rate_limiter.clear_auth_failures(client_ip)
+        rate_limiter.clear_auth_failures(account_key)
         _increment_shared_metric("auth_events_total:success", 1.0)
         logger.info(f"User logged in successfully: {email}", extra={"event_type": "login_success"})
         return success_response(auth_result, 200)
     except Exception as e:
         _increment_shared_metric("auth_events_total:failure", 1.0)
-        locked, retry_after = rate_limiter.record_auth_failure(client_ip)
+        ip_locked, ip_retry = rate_limiter.record_auth_failure(client_ip)
+        acct_locked, acct_retry = rate_limiter.record_auth_failure(account_key)
         logger.warning(f"Failed login attempt for {email} from {client_ip}: {e}", extra={"event_type": "login_failure"})
-        if locked:
+        if ip_locked or acct_locked:
             _increment_shared_metric("auth_events_total:lockout", 1.0)
+            retry_after = max(ip_retry, acct_retry)
             resp = jsonify({"error": "Account/IP temporarily locked due to repeated failed login attempts."})
             resp.status_code = 429
             resp.headers["Retry-After"] = str(retry_after)
@@ -435,11 +477,10 @@ def login_user():
 
 @app.route("/users/info", methods=["POST"])
 def set_user_info():
+    """
+    Requires authentication exclusively via the Authorization: Bearer header.
+    """
     token, err = get_auth_token()
-    data = request.get_json(silent=True) or {}
-
-    if not token:
-        token = data.get("id_token")
     if not token:
         return error_response(err or "Authentication required", 401)
 
@@ -447,6 +488,7 @@ def set_user_info():
     if auth_err:
         return error_response(auth_err[0], auth_err[1])
 
+    data = request.get_json(silent=True) or {}
     uid = decoded.get("uid")
     try:
         majors = [sanitize_string(m, 100) for m in (data.get("majors") or []) if isinstance(m, str)]
@@ -493,13 +535,10 @@ def get_user_info():
 @app.route("/users/query", methods=["POST"])
 def get_user_query():
     """
-    Fixed Missing Authentication (CWE-306): Requires valid Bearer token before
-    invoking the LLM QueryManager to prevent unauthorized API quota exhaustion.
+    Fixed Missing Authentication (CWE-306): Requires valid Bearer token in the Authorization header
+    before invoking the LLM QueryManager to prevent unauthorized API quota exhaustion.
     """
     token, err = get_auth_token()
-    data = request.get_json(silent=True) or {}
-    if not token:
-        token = data.get("id_token")
     if not token:
         return error_response(err or "Authentication required to execute queries.", 401)
 
@@ -507,6 +546,7 @@ def get_user_query():
     if auth_err:
         return error_response(auth_err[0], auth_err[1])
 
+    data = request.get_json(silent=True) or {}
     query = str(data.get("query", "")).strip()
     if not query:
         return error_response("Query cannot be empty.", 400)
@@ -601,6 +641,11 @@ def delete_chat(chat_id):
 @app.errorhandler(404)
 def handle_404(e):
     return error_response("Resource not found", 404)
+
+
+@app.errorhandler(413)
+def handle_413(e):
+    return error_response("Payload too large. Maximum allowed request body is 1 MB.", 413)
 
 
 @app.errorhandler(500)

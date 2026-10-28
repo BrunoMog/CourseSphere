@@ -3,7 +3,9 @@ import os
 import re
 import json
 import time
+import hashlib
 import logging
+import sqlite3
 from pathlib import Path
 
 try:
@@ -13,6 +15,7 @@ try:
         verify_password,
         create_session_token,
         verify_session_token,
+        sanitize_string,
     )
 except ImportError:
     from db import create_connection
@@ -21,9 +24,15 @@ except ImportError:
         verify_password,
         create_session_token,
         verify_session_token,
+        sanitize_string,
     )
 
 logger = logging.getLogger(__name__)
+
+
+class UserAlreadyExistsError(ValueError):
+    """Raised when attempting to register an email address that already exists."""
+
 
 try:
     import firebase_admin
@@ -64,36 +73,46 @@ class Firebase:
     @staticmethod
     def create_user(email: str, password: str):
         """
-        Creates a user with an scrypt password hash persisted in the shared database
-        so all Gunicorn workers and container replicas share the exact same user state.
-        If Firebase Admin is configured, also provisions the account in Firebase Auth.
+        Creates a new user with an scrypt password hash persisted in the shared database.
+        Prevents Account Takeover (CWE-620) by rejecting duplicate email registrations
+        with UserAlreadyExistsError (mapped to HTTP 409 Conflict) instead of overwriting
+        existing credentials.
         """
         normalized_email = email.strip().lower()
         password_hash = hash_password(password)
 
-        if firebase_app and auth:
-            try:
-                fb_user = auth.create_user(email=normalized_email, password=password)
-                uid = fb_user.uid
-            except Exception as e:
-                raise Exception(f"Error creating user in Firebase: {str(e)}")
-        else:
-            clean_prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_", normalized_email.split("@")[0])
-            uid = f"user-{clean_prefix}"
-
         conn = create_connection()
         try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM app_users WHERE email = ?", (normalized_email,))
+            if cur.fetchone():
+                raise UserAlreadyExistsError("An account with this email already exists.")
+
+            if firebase_app and auth:
+                try:
+                    fb_user = auth.create_user(email=normalized_email, password=password)
+                    uid = fb_user.uid
+                except Exception as e:
+                    if "ALREADY_EXISTS" in str(e).upper():
+                        raise UserAlreadyExistsError("An account with this email already exists.")
+                    raise Exception(f"Error creating user in Firebase: {str(e)}")
+            else:
+                clean_prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_", normalized_email.split("@")[0])[:32]
+                email_digest = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()[:8]
+                uid = f"user-{clean_prefix}-{email_digest}"
+
             default_profile = json.dumps({"email": normalized_email, "uid": uid})
-            conn.execute(
-                """
-                INSERT INTO app_users (uid, email, password_hash, user_info_json, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(email) DO UPDATE SET
-                    password_hash = excluded.password_hash
-                """,
-                (uid, normalized_email, password_hash, default_profile, time.time()),
-            )
-            conn.commit()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO app_users (uid, email, password_hash, user_info_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (uid, normalized_email, password_hash, default_profile, time.time()),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                raise UserAlreadyExistsError("An account with this email already exists.")
         finally:
             conn.close()
 
@@ -153,16 +172,19 @@ class Firebase:
 
     @staticmethod
     def verify_id_token(id_token: str):
+        """
+        Verifies an authentication token strictly via cryptographic signature:
+        - Accepts HMAC-SHA256 signed session tokens (`csjwt.<payload>.<sig>`) with expiration check.
+        - Accepts Firebase Admin JWTs when Firebase is initialized.
+        - Never accepts unsigned `test-token-*` strings in any environment.
+        """
         if not id_token:
             raise ValueError("Authentication token is required")
         token_str = str(id_token).strip()
         if token_str.startswith("csjwt."):
             return verify_session_token(token_str)
-        if not firebase_app:
-            if token_str.startswith("test-token-"):
-                uid = validate_path_identifier(token_str.replace("test-token-", ""), "User ID")
-                return {"uid": uid}
-            raise RuntimeError("Invalid authentication token.")
+        if not firebase_app or not auth:
+            raise ValueError("Invalid or unsigned authentication token.")
         try:
             decoded_token = auth.verify_id_token(token_str)
             return decoded_token
@@ -287,9 +309,19 @@ class Firebase:
         chat_id = validate_path_identifier(chat_id, "Chat ID")
         if not isinstance(messages, list):
             raise ValueError("Messages must be a list of dictionaries.")
+        if len(messages) > 50:
+            raise ValueError("Cannot save more than 50 messages in a single request.")
+
+        sanitized_messages = []
         for message in messages:
             if not isinstance(message, dict):
                 raise ValueError("Each message must be a dictionary.")
+            sanitized_msg = {}
+            for k, v in message.items():
+                key_clean = sanitize_string(k, max_length=64)
+                val_clean = sanitize_string(v, max_length=2000) if isinstance(v, str) else v
+                sanitized_msg[key_clean] = val_clean
+            sanitized_messages.append(sanitized_msg)
 
         conn = create_connection()
         try:
@@ -300,7 +332,7 @@ class Firebase:
             )
             row = cur.fetchone()
             existing = json.loads(row["messages_json"]) if row and row["messages_json"] else []
-            existing.extend(messages)
+            existing.extend(sanitized_messages)
             cur.execute(
                 """
                 INSERT INTO user_chats (uid, chat_id, messages_json, updated_at)
@@ -318,7 +350,7 @@ class Firebase:
         if firebase_app and db:
             try:
                 ref = db.reference(f"users/{uid}/chats/{chat_id}/messages")
-                for message in messages:
+                for message in sanitized_messages:
                     ref.push(message)
             except Exception as e:
                 raise Exception(f"Error saving messages: {str(e)}")

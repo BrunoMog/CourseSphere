@@ -108,18 +108,18 @@ Req #    | Status   | X-Served-By          | X-Upstream-Backend     | Latency (m
 
 ---
 
-## 🧪 Suíte de Testes Automatizados de Segurança e Confiabilidade (20 Testes)
+## 🧪 Suíte de Testes Automatizados de Segurança e Confiabilidade (28 Testes)
 
-Foram implementados **20 testes automatizados** em `pytest` (`backend/tests/test_courses_security.py` e `backend/tests/test_endpoints_security.py`) cobrindo:
+Foram implementados **28 testes automatizados** em `pytest` (`backend/tests/test_courses_security.py` e `backend/tests/test_endpoints_security.py`) cobrindo:
 - Neutralização de SQL Injection em todas as rotas de cursos e migração de dados;
 - Controle de acesso por propriedade de recurso (**BOLA/IDOR**): usuário autenticado tentando editar (`PUT /courses/<id>`) ou excluir (`DELETE /courses/<id>`) curso de outro criador recebe **`HTTP 403 Forbidden`**;
-- Sanitização de payloads XSS (`<script>`) na criação e edição de cursos;
-- Bloqueio de transporte inseguro de token na URL (`?id_token=` -> `HTTP 401`) e exigência de autenticação em `POST /users/query`;
-- **Rate Limiting e Brute-Force Lockout** em `POST /users/login` (`HTTP 429 Too Many Requests` + `Retry-After` após 5 falhas);
-- Expiração criptográfica de tokens HMAC e hashing de senhas com `scrypt`;
+- Prevenção de **Account Takeover (`CWE-620`)**: recadastro de e-mail existente em `POST /users/create` é bloqueado com **`HTTP 409 Conflict`** sem sobrescrever a senha original;
+- Rejeição estrita de tokens não assinados (`test-token-*` -> `HTTP 401`), de tokens em query string (`?id_token=` -> `HTTP 401`) ou body JSON (`id_token` -> `HTTP 401`), exigindo `Authorization: Bearer <csjwt>`;
+- Sanitização de payloads XSS (`<script>`) na criação e edição de cursos e mensagens de chat;
+- **Rate Limiting e Brute-Force Lockout** por IP e por conta em `POST /users/login` (`HTTP 429 Too Many Requests` + `Retry-After` após 5 falhas) e validação CIDR RFC 1918 contra spoofing de `X-Forwarded-For`;
+- Expiração criptográfica de tokens HMAC, hashing de senhas com `scrypt` e fail-closed em produção sem `COURSESPHERE_SECRET_KEY`;
 - Bloqueio de **Path Traversal** (`../`) e proteção **CSRF / Origin / Content-Type (`415`)**;
-- Transições de estado do **Circuit Breaker** (`CLOSED -> OPEN -> HALF_OPEN -> CLOSED`) e retry com backoff;
-- Presença de headers de segurança HTTP e métricas Prometheus (`/metrics`).
+- Transições de estado do **Circuit Breaker** (`CLOSED -> OPEN -> HALF_OPEN -> CLOSED`), consistência multi-réplica e controle de cardinalidade em `/metrics`.
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -170,7 +170,7 @@ uvx pip-audit -r backend/requirements.txt
 
 ## 📈 Métricas, SLIs e SLOs (SRE)
 
-- **SLI 1 (Latência de Consulta — Histograma Prometheus)**: Proporção de requisições HTTP atendidas com latência inferior a `200ms` (`coursesphere_http_request_duration_seconds_bucket{le="0.2"}`).
+- **SLI 1 (Latência de Consulta — Histograma Prometheus)**: Proporção de requisições HTTP atendidas com latência inferior a `200ms` (`http_request_duration_seconds_bucket{le="0.2"}`).
   - **SLO 1**: **99.0%** das requisições válidas atendidas em `< 200ms` em janela móvel de 30 dias.
 - **SLI 2 (Disponibilidade)**: Proporção de requisições HTTP com status diferente de `5xx`.
   - **SLO 2**: **99.5%** de disponibilidade em janela móvel de 30 dias.

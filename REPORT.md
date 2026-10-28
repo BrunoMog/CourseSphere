@@ -7,7 +7,7 @@
 | Campo | Detalhamento |
 |---|---|
 | **Título do Documento** | Relatório de Avaliação de Segurança (Pentest Web) e Engenharia de Confiabilidade — CourseSphere |
-| **Versão** | `2.1 (Final — Pós-Remediação, Hardening e Revisão de Consistência Distribuída)` |
+| **Versão** | `2.2 (Final — Pós-Remediação, Hardening, Consistência Distribuída e Validação Criptográfica Estrita)` |
 | **Classificação** | **PÚBLICO — AVALIAÇÃO TÉCNICA (APPSEC & SRE)** |
 | **Aplicação Alvo** | CourseSphere (Backend Python/Flask + Frontend React/TypeScript/Vite + SQLite/Firebase/OpenAI) |
 | **Autor / Auditor** | Bolsista de Segurança de Aplicações e Confiabilidade (AppSec / SRE) |
@@ -28,9 +28,9 @@ A avaliação combinou análise estática automatizada (**SAST** com Bandit e Se
 | Indicador de Segurança e Confiabilidade | Estado Inicial (`main`) | Estado Pós-Intervenção (`fix/security-and-hardening`) |
 |---|---|---|
 | **Vulnerabilidades Reais Documentadas** | **9 vulnerabilidades** (1 Crítica, 4 Altas, 4 Médias) | **100% Remediadas / Mitigadas na Causa Raiz** |
-| **Alertas SAST — Bandit (Backend Python)** | **20 alertas** (1 High, 15 Medium, 4 Low) | **0 alertas** (0 High, 0 Medium, 0 Low em 2.298 LOC) |
+| **Alertas SAST — Bandit (Backend Python)** | **20 alertas** (1 High, 15 Medium, 4 Low) | **0 alertas** (0 High, 0 Medium, 0 Low em 2.377 LOC) |
 | **Alertas SAST — Semgrep (Full-Stack & IaC)** | **24 achados bloqueantes** | **0 achados bloqueantes** |
-| **Suíte de Testes Automatizados de Segurança** | **0 testes** | **24 testes automatizados (`pytest`) — 100% Passing** |
+| **Suíte de Testes Automatizados de Segurança** | **0 testes** | **28 testes automatizados (`pytest`) — 100% Passing** |
 | **Postura de Containers e Estado entre Réplicas** | Apenas frontend em `node:16` rodando como `root` | Multi-stage builds **non-root** + Nginx LB (2 réplicas com **volume SQLite WAL compartilhado**) + Manifestos **K8s** |
 | **Observabilidade e Resiliência SRE** | Inexistente (`print` statements e erros brutos) | Logs JSON + `/health` + `/metrics` (agregado entre workers e baixa cardinalidade) + **Circuit Breaker** |
 
@@ -258,7 +258,7 @@ Foram identificados três vetores de falha de controle de acesso:
 ```http
 PUT /courses/1 HTTP/1.1
 Host: localhost:5000
-Authorization: Bearer test-token-bob
+Authorization: Bearer csjwt.<payload_bob>.<hmac_sig>
 Content-Type: application/json
 
 {"name": "Curso Adulterado por Bob"}
@@ -274,7 +274,7 @@ Content-Type: application/json
 ```http
 POST /chats/..%2F..%2Fvictim_uid/messages HTTP/1.1
 Host: localhost:5000
-Authorization: Bearer test-token-alice
+Authorization: Bearer csjwt.<payload_alice>.<hmac_sig>
 Content-Type: application/json
 
 {"messages": [{"sender": "user", "content": "overwrite"}]}
@@ -449,8 +449,8 @@ No commit original (`main: 71616a0`):
 Embora o edital exigisse no mínimo **2 melhorias** de hardening não previstas na especificação funcional original, foram implementadas **5 camadas completas de hardening** em [`backend/security.py`](backend/security.py) e [`backend/endpoints.py`](backend/endpoints.py):
 
 1. **Rate Limiting Compartilhado e Bloqueio Automático após Tentativas de Login Malsucedidas**:
-   - Algoritmo *sliding-window* persistido no banco SQLite WAL compartilhado (`rate_limit_events`), limitando chamadas gerais por IP (`RATE_LIMIT_PER_MINUTE=60`, expondo o header `X-RateLimit-Remaining`).
-   - Contador compartilhado de falhas de autenticação (`auth_lockouts`) que bloqueia temporariamente o IP por 5 minutos (`AUTH_LOCKOUT_SECONDS=300`) após 5 falhas consecutivas em qualquer worker/réplica, retornando `HTTP 429 Too Many Requests` com cabeçalho `Retry-After` e proteção contra spoofing de `X-Forwarded-For`.
+   - Algoritmo *sliding-window* persistido no banco SQLite WAL compartilhado (`rate_limit_events`), limitando chamadas gerais por IP (`RATE_LIMIT_PER_MINUTE=60`, expondo o header `X-RateLimit-Remaining`) e aplicando limite máximo de payload (`MAX_CONTENT_LENGTH = 1 MB`, `HTTP 413`).
+   - Contador compartilhado de falhas de autenticação (`auth_lockouts`) por IP e por conta (`acct:<email>`) que bloqueia temporariamente por 5 minutos (`AUTH_LOCKOUT_SECONDS=300`) após 5 falhas consecutivas em qualquer worker/réplica, retornando `HTTP 429 Too Many Requests` com cabeçalho `Retry-After` e validação estrita de sub-redes confiáveis RFC 1918 via `ipaddress.ip_network` contra spoofing de `X-Forwarded-For`.
 2. **Headers de Segurança HTTP Completos**:
    - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none';`
    - `Strict-Transport-Security: max-age=31536000; includeSubDomains` (HSTS; em ambientes sem terminação TLS local no container, a terminação HTTPS deve ocorrer no Ingress/Load Balancer externo)
@@ -459,12 +459,12 @@ Embora o edital exigisse no mínimo **2 melhorias** de hardening não previstas 
    - `Referrer-Policy: strict-origin-when-cross-origin`
    - `Permissions-Policy: geolocation=(), microphone=(), camera=()`
 3. **Sanitização e Validação Consistente de Inputs no Backend**:
-   - Escapamento automático de entidades HTML (`<`, `>`, `&`, `"`, `'`), remoção de bytes nulos (`\x00`), validação de formato de e-mail por regex e validação tipada de campos de cursos (`validate_course_payload`).
+   - Escapamento automático de entidades HTML (`<`, `>`, `&`, `"`, `'`), remoção de bytes nulos (`\x00`), validação de formato de e-mail por regex, sanitização de mensagens de chat (`save_chat` com limite de lote de 50 mensagens) e validação tipada de campos de cursos (`validate_course_payload`).
 4. **Proteção contra CSRF em Rotas que Alteram Estado (`POST`, `PUT`, `DELETE`)**:
    - Verificação obrigatória de `Content-Type: application/json` (bloqueando submissões via `<form>` HTML simples com `HTTP 415`) e validação estrita do cabeçalho `Origin` contra `ALLOWED_ORIGINS` (`HTTP 403`).
-5. **Hashing de Senha com Algoritmo Memory-Hard (`scrypt`) e Tokens com Expiração (`exp`)**:
-   - Senhas processadas com `hashlib.scrypt` (`N=16384, r=8, p=1`, salt aleatório de 16 bytes via `secrets.token_bytes`), persistidas na tabela compartilhada `app_users` e verificadas em tempo constante (`hmac.compare_digest`).
-   - Emissão de tokens de sessão assinados (`csjwt.<payload>.<hmac_sha256>`) com validação obrigatória do claim de expiração (`exp`) e sem qualquer chave secreta hardcoded.
+5. **Hashing de Senha com Algoritmo Memory-Hard (`scrypt`), Prevenção de Account Takeover (`HTTP 409`) e Tokens HMAC com Expiração (`exp`)**:
+   - Senhas processadas com `hashlib.scrypt` (`N=16384, r=8, p=1`, salt aleatório de 16 bytes via `secrets.token_bytes`), persistidas na tabela compartilhada `app_users`, verificadas em tempo constante (`hmac.compare_digest`) e protegidas contra sobrescrita em recadastro de e-mail existente (`UserAlreadyExistsError` $\rightarrow$ `HTTP 409 Conflict`, prevenindo *Account Takeover* `CWE-620`).
+   - Emissão e verificação estrita de tokens de sessão assinados (`csjwt.<payload>.<hmac_sha256>`) com validação obrigatória do claim de expiração (`exp`), transporte exclusivo via cabeçalho `Authorization: Bearer <token>` (sem fallback por query string ou body JSON) e sem qualquer chave secreta hardcoded.
 
 ---
 
@@ -605,7 +605,7 @@ A priorização abaixo combina **Severidade (Impacto de Negócio)** $\times$ **E
   Test results:
       No issues identified.
   Code scanned:
-      Total lines of code: 2298
+      Total lines of code: 2377
       Total lines skipped (#nosec): 0
   Run metrics:
       Total issues (by severity): High: 0, Medium: 0, Low: 0
@@ -615,39 +615,43 @@ A priorização abaixo combina **Severidade (Impacto de Negócio)** $\times$ **E
 Arquivo de execução: [`backend/tests/test_courses_security.py`](backend/tests/test_courses_security.py) e [`backend/tests/test_endpoints_security.py`](backend/tests/test_endpoints_security.py):
 ```text
 ============================= test session starts ==============================
-collected 24 items
+collected 28 items
 
-backend/tests/test_courses_security.py::test_get_course_valid PASSED     [  4%]
-backend/tests/test_courses_security.py::test_get_course_not_found PASSED [  8%]
-backend/tests/test_courses_security.py::test_sql_injection_in_semester_parameter PASSED [ 12%]
-backend/tests/test_courses_security.py::test_sql_injection_union_based PASSED [ 16%]
-backend/tests/test_courses_security.py::test_query_filter_parameterized PASSED [ 20%]
-backend/tests/test_courses_security.py::test_create_course_requires_authentication PASSED [ 25%]
-backend/tests/test_courses_security.py::test_course_authorization_owner_vs_other_user PASSED [ 29%]
-backend/tests/test_courses_security.py::test_course_input_xss_sanitization PASSED [ 33%]
-backend/tests/test_endpoints_security.py::test_health_endpoint PASSED    [ 37%]
-backend/tests/test_endpoints_security.py::test_metrics_endpoint PASSED   [ 41%]
-backend/tests/test_endpoints_security.py::test_metrics_route_pattern_bounded_cardinality PASSED [ 45%]
-backend/tests/test_endpoints_security.py::test_security_headers_present PASSED [ 50%]
-backend/tests/test_endpoints_security.py::test_token_in_url_rejected PASSED [ 54%]
-backend/tests/test_endpoints_security.py::test_missing_auth_header_rejected PASSED [ 58%]
-backend/tests/test_endpoints_security.py::test_valid_bearer_token_accepted PASSED [ 62%]
-backend/tests/test_endpoints_security.py::test_hash_endpoint_with_valid_bearer PASSED [ 66%]
-backend/tests/test_endpoints_security.py::test_chat_path_traversal_blocked PASSED [ 70%]
+backend/tests/test_courses_security.py::test_get_course_valid PASSED     [  3%]
+backend/tests/test_courses_security.py::test_get_course_not_found PASSED [  7%]
+backend/tests/test_courses_security.py::test_sql_injection_in_semester_parameter PASSED [ 10%]
+backend/tests/test_courses_security.py::test_sql_injection_union_based PASSED [ 14%]
+backend/tests/test_courses_security.py::test_query_filter_parameterized PASSED [ 17%]
+backend/tests/test_courses_security.py::test_create_course_requires_authentication PASSED [ 21%]
+backend/tests/test_courses_security.py::test_course_authorization_owner_vs_other_user PASSED [ 25%]
+backend/tests/test_courses_security.py::test_course_input_xss_sanitization PASSED [ 28%]
+backend/tests/test_endpoints_security.py::test_health_endpoint PASSED    [ 32%]
+backend/tests/test_endpoints_security.py::test_metrics_endpoint PASSED   [ 35%]
+backend/tests/test_endpoints_security.py::test_metrics_route_pattern_bounded_cardinality PASSED [ 39%]
+backend/tests/test_endpoints_security.py::test_security_headers_present PASSED [ 42%]
+backend/tests/test_endpoints_security.py::test_token_in_url_rejected PASSED [ 46%]
+backend/tests/test_endpoints_security.py::test_body_id_token_rejected_without_authorization_header PASSED [ 50%]
+backend/tests/test_endpoints_security.py::test_missing_auth_header_rejected PASSED [ 53%]
+backend/tests/test_endpoints_security.py::test_forged_test_tokens_rejected_with_401 PASSED [ 57%]
+backend/tests/test_endpoints_security.py::test_duplicate_signup_rejected_with_409_preventing_account_takeover PASSED [ 60%]
+backend/tests/test_endpoints_security.py::test_valid_bearer_token_accepted PASSED [ 64%]
+backend/tests/test_endpoints_security.py::test_hash_endpoint_with_valid_bearer PASSED [ 67%]
+backend/tests/test_endpoints_security.py::test_chat_path_traversal_blocked PASSED [ 71%]
 backend/tests/test_endpoints_security.py::test_scrypt_password_hashing_and_session_token_lifecycle PASSED [ 75%]
-backend/tests/test_endpoints_security.py::test_production_mode_fails_without_secret_key PASSED [ 79%]
-backend/tests/test_endpoints_security.py::test_brute_force_lockout_on_failed_logins PASSED [ 83%]
-backend/tests/test_endpoints_security.py::test_rate_limit_cannot_be_bypassed_via_x_forwarded_for_spoofing PASSED [ 87%]
-backend/tests/test_endpoints_security.py::test_csrf_and_content_type_protection PASSED [ 91%]
-backend/tests/test_endpoints_security.py::test_circuit_breaker_state_transitions PASSED [ 95%]
+backend/tests/test_endpoints_security.py::test_production_mode_fails_without_secret_key PASSED [ 78%]
+backend/tests/test_endpoints_security.py::test_trusted_proxy_cidr_validation PASSED [ 82%]
+backend/tests/test_endpoints_security.py::test_brute_force_lockout_on_failed_logins PASSED [ 85%]
+backend/tests/test_endpoints_security.py::test_rate_limit_cannot_be_bypassed_via_x_forwarded_for_spoofing PASSED [ 89%]
+backend/tests/test_endpoints_security.py::test_csrf_and_content_type_protection PASSED [ 92%]
+backend/tests/test_endpoints_security.py::test_circuit_breaker_state_transitions PASSED [ 96%]
 backend/tests/test_endpoints_security.py::test_multi_replica_shared_state_consistency PASSED [100%]
 
-============================== 24 passed in 1.52s ==============================
+============================== 28 passed in 2.21s ==============================
 ```
 
 ### Apêndice C — Resultado do SAST Semgrep & SCA Contínuo (Dependabot)
 - **Antes da Remediação** ([`audit_reports/semgrep_report.json`](audit_reports/semgrep_report.json)): **24 achados bloqueantes** (incluindo `formatted-sql-query`, `flask-wtf-csrf-disabled`, `dockerfile.security.missing-user`, `github-actions-mutable-action-tag`).
-- **Após a Remediação** ([`audit_reports/semgrep_post_fix_report.json`](audit_reports/semgrep_post_fix_report.json)): **0 findings em 519 regras e 131 arquivos analisados**.
+- **Após a Remediação** ([`audit_reports/semgrep_post_fix_report.json`](audit_reports/semgrep_post_fix_report.json)): **0 findings em 333 regras e 51 arquivos analisados**.
 - **Automação de SCA Contínuo (Dependabot)**: Configurado em [`.github/dependabot.yml`](.github/dependabot.yml) para varredura semanal automática de vulnerabilidades nos ecossistemas `pip`, `npm`, `docker` e `github-actions`.
 
 ### Apêndice D — Mapa Completo de Endpoints da Aplicação (`Application Sitemap` — Template Web-App)
@@ -664,10 +668,10 @@ backend/tests/test_endpoints_security.py::test_multi_replica_shared_state_consis
 | `POST` | `/courses` | **Bearer Token Obrigatório** | Sanitização anti-XSS (`sanitize_string`), validação de payload e vínculo ao `creator_uid` do token. |
 | `PUT` | `/courses/<int:course_id>` | **Bearer Token Obrigatório** | **Prevenção de BOLA/IDOR**: exige `course["creator_uid"] == uid` (retorna **`HTTP 403 Forbidden`** para terceiros). |
 | `DELETE` | `/courses/<int:course_id>` | **Bearer Token Obrigatório** | **Prevenção de BOLA/IDOR**: exige `course["creator_uid"] == uid` (retorna **`HTTP 403 Forbidden`** para terceiros). |
-| `POST` | `/users/login` | Pública (Credenciais no Body) | **Rate Limit (10 req/min) + Brute-Force Lockout** após 5 falhas (`HTTP 429` + `Retry-After`), verificação `scrypt` e emissão de token HMAC com `exp`. |
-| `POST` | `/users/create` | **Bearer Token Obrigatório** | Rejeita token em query string (`401`), valida header `Authorization: Bearer` e cria perfil no Firebase. |
-| `GET/POST` | `/users/info` | **Bearer Token Obrigatório** | Rejeita `?id_token=` na URL (`401`); extrai identidade exclusivamente do token Bearer verificado. |
-| `POST` | `/users/query` | **Bearer Token Obrigatório** | Autenticação obrigatória (`CWE-306`), delimitadores anti-Prompt Injection (`<user_query>`) e Circuit Breaker OpenAI. |
+| `POST` | `/users/login` | Pública (Credenciais no Body) | **Rate Limit + Brute-Force Lockout por IP e Conta** após 5 falhas (`HTTP 429` + `Retry-After`), verificação `scrypt` e emissão de token HMAC com `exp`. |
+| `POST` | `/users/create` | Pública (Cadastro com Credenciais no Body) | Valida formato de e-mail e complexidade de senha (`>= 8` chars), aplica hash `scrypt` e **previne Account Takeover rejeitando e-mails já cadastrados com `HTTP 409 Conflict`**. |
+| `GET/POST` | `/users/info` | **Bearer Token Obrigatório** | Rejeita `?id_token=` na URL e `id_token` no body (`401`); extrai identidade exclusivamente do header `Authorization: Bearer`. |
+| `POST` | `/users/query` | **Bearer Token Obrigatório** | Autenticação exclusiva via header `Authorization: Bearer` (`CWE-306`), delimitadores anti-Prompt Injection (`<user_query>`) e Circuit Breaker OpenAI. |
 | `POST` | `/chats/<chat_id>/messages` | **Bearer Token Obrigatório** | Regex anti-Path Traversal (`validate_path_identifier`) + verificação de posse do chat. |
 | `DELETE` | `/chats/<chat_id>` | **Bearer Token Obrigatório** | Regex anti-Path Traversal + verificação de propriedade do chat antes de excluir. |
 | `POST` | `/hash` | **Bearer Token Obrigatório** | Gera código de compartimento via `HMAC-SHA256` com chave secreta e CSPRNG (`secrets`). |

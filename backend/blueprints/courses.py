@@ -4,11 +4,11 @@ from flask import Blueprint, jsonify, request
 try:
     from backend.db import execute_query
     from backend.firebase import Firebase
-    from backend.security import validate_course_payload
+    from backend.security import validate_course_payload, rate_limiter
 except ImportError:
     from db import execute_query
     from firebase import Firebase
-    from security import validate_course_payload
+    from security import validate_course_payload, rate_limiter
 
 courses_bp = Blueprint("courses", __name__)
 logger = logging.getLogger("coursesphere")
@@ -34,7 +34,11 @@ def _get_authenticated_uid():
             return None, ("Invalid token payload.", 401)
         return uid, None
     except Exception as exc:
+        client_ip = request.remote_addr or "127.0.0.1"
+        locked, _ = rate_limiter.record_auth_failure(client_ip)
         logger.warning(f"Course endpoint authentication failure: {exc}")
+        if locked:
+            return None, ("Too many failed authentication attempts. Account/IP locked.", 429)
         return None, ("Invalid or expired authentication token.", 401)
 
 

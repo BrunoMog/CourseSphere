@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db import create_connection
+from security import create_session_token
 from blueprints.courses import courses_bp
 from flask import Flask
 
@@ -102,10 +103,13 @@ def test_course_authorization_owner_vs_other_user(client):
     User 'bob' CANNOT edit or delete a course created by 'alice' (HTTP 403 Forbidden),
     whereas 'alice' CAN edit and delete her own course (HTTP 200 OK).
     """
+    alice_token = create_session_token("alice")
+    bob_token = create_session_token("bob")
+
     # 1. Alice creates a new course
     create_resp = client.post(
         "/courses",
-        headers={"Authorization": "Bearer test-token-alice"},
+        headers={"Authorization": f"Bearer {alice_token}"},
         json={
             "name": "Distributed Systems SRE",
             "section_id": 305,
@@ -123,7 +127,7 @@ def test_course_authorization_owner_vs_other_user(client):
     # 2. Bob attempts to edit Alice's course -> Must fail with 403 Forbidden
     bob_edit_resp = client.put(
         f"/courses/{course_id}",
-        headers={"Authorization": "Bearer test-token-bob"},
+        headers={"Authorization": f"Bearer {bob_token}"},
         json={"name": "Tampered Course Title"},
     )
     assert bob_edit_resp.status_code == 403
@@ -132,14 +136,14 @@ def test_course_authorization_owner_vs_other_user(client):
     # 3. Bob attempts to delete Alice's course -> Must fail with 403 Forbidden
     bob_delete_resp = client.delete(
         f"/courses/{course_id}",
-        headers={"Authorization": "Bearer test-token-bob"},
+        headers={"Authorization": f"Bearer {bob_token}"},
     )
     assert bob_delete_resp.status_code == 403
 
     # 4. Alice edits her own course -> Succeeds with 200 OK
     alice_edit_resp = client.put(
         f"/courses/{course_id}",
-        headers={"Authorization": "Bearer test-token-alice"},
+        headers={"Authorization": f"Bearer {alice_token}"},
         json={"name": "Advanced Distributed Systems SRE"},
     )
     assert alice_edit_resp.status_code == 200
@@ -148,16 +152,17 @@ def test_course_authorization_owner_vs_other_user(client):
     # 5. Alice deletes her own course -> Succeeds with 200 OK
     alice_delete_resp = client.delete(
         f"/courses/{course_id}",
-        headers={"Authorization": "Bearer test-token-alice"},
+        headers={"Authorization": f"Bearer {alice_token}"},
     )
     assert alice_delete_resp.status_code == 200
 
 
 def test_course_input_xss_sanitization(client):
     """Verify HTML/script tags in course payloads are sanitized against Stored XSS."""
+    alice_token = create_session_token("alice")
     resp = client.post(
         "/courses",
-        headers={"Authorization": "Bearer test-token-alice"},
+        headers={"Authorization": f"Bearer {alice_token}"},
         json={
             "name": "<script>alert('xss')</script>Security",
             "semester": "Fall2026",

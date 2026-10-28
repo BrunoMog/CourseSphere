@@ -25,10 +25,17 @@ class CircuitBreaker:
     STATE_HALF_OPEN = 1
     STATE_OPEN = 2
 
-    def __init__(self, name: str, failure_threshold: int = 3, recovery_timeout: float = 30.0):
+    def __init__(
+        self,
+        name: str,
+        failure_threshold: int = 3,
+        recovery_timeout: float = 30.0,
+        excluded_exceptions: tuple = (ValueError,),
+    ):
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
+        self.excluded_exceptions = excluded_exceptions
         self.state = self.STATE_CLOSED
         self.failure_count = 0
         self.last_failure_time = 0.0
@@ -57,7 +64,8 @@ class CircuitBreaker:
         try:
             result = func(*args, **kwargs)
         except Exception as exc:
-            self._record_failure(exc)
+            if not isinstance(exc, self.excluded_exceptions):
+                self._record_failure(exc)
             raise
 
         self._record_success()
@@ -98,7 +106,7 @@ def retry_with_backoff(max_retries: int = 2, base_delay: float = 0.05, max_delay
             while True:
                 try:
                     return func(*args, **kwargs)
-                except CircuitBreakerOpenException:
+                except (CircuitBreakerOpenException, ValueError):
                     raise
                 except Exception as exc:
                     attempt += 1

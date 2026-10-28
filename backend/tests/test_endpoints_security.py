@@ -1,4 +1,3 @@
-import os
 import pytest
 import sys
 from pathlib import Path
@@ -6,7 +5,7 @@ from pathlib import Path
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from endpoints import app
+from endpoints import app, _is_trusted_proxy
 from security import (
     rate_limiter,
     get_secret_key,
@@ -89,11 +88,25 @@ def test_token_in_url_rejected(client):
     Test VULN-04 Fix: Passing authentication token via URL query parameter
     must be rejected to prevent leakage in server access logs (CWE-598).
     """
-    response = client.get("/users/info?id_token=test-token-alice")
+    token = create_session_token("alice")
+    response = client.get(f"/users/info?id_token={token}")
     assert response.status_code == 401
     data = response.get_json()
     assert "error" in data
     assert "query parameter" in data["error"].lower()
+
+
+def test_body_id_token_rejected_without_authorization_header(client):
+    """
+    Test Token Transport Policy: Sending `id_token` in JSON body without the
+    `Authorization: Bearer` header must be rejected with HTTP 401.
+    """
+    token = create_session_token("alice")
+    info_resp = client.post("/users/info", json={"id_token": token, "college": "Engineering"})
+    assert info_resp.status_code == 401
+
+    query_resp = client.post("/users/query", json={"id_token": token, "query": "CS courses"})
+    assert query_resp.status_code == 401
 
 
 def test_missing_auth_header_rejected(client):
@@ -103,17 +116,78 @@ def test_missing_auth_header_rejected(client):
     assert client.post("/hash", json={"msg": "hi"}).status_code == 401
 
 
+def test_forged_test_tokens_rejected_with_401(client):
+    """
+    Test Critical Fix: Unsigned `test-token-*` strings must NEVER be accepted
+    as valid credentials on any endpoint (HTTP 401 Unauthorized) and must not
+    trip the CircuitBreaker into 503 Service Unavailable.
+    """
+    forged_tokens = ("test-token-alice", "test-token-admin")
+    for forged in forged_tokens:
+        resp = client.get("/users/info", headers={"Authorization": f"Bearer {forged}"})
+        assert resp.status_code == 401
+
+        hash_resp = client.post(
+            "/hash",
+            headers={"Authorization": f"Bearer {forged}"},
+            json={"content": "attempt"},
+        )
+        assert hash_resp.status_code == 401
+
+    # 5th forged attempt hits max_failures=5 and triggers 429 lockout (never 200 or 503)
+    fifth = client.get("/users/info", headers={"Authorization": "Bearer test-token-user-alice"})
+    assert fifth.status_code == 429
+
+
+def test_duplicate_signup_rejected_with_409_preventing_account_takeover(client):
+    """
+    Test Critical Fix (CWE-620): Re-registering an existing email via POST /users/create
+    must fail with HTTP 409 Conflict and MUST NOT overwrite the original user's password hash.
+    """
+    # 1. Register alice@example.com with original password
+    first_signup = client.post(
+        "/users/create",
+        json={"email": "alice@example.com", "password": "OriginalPassword!123"},
+    )
+    assert first_signup.status_code == 200
+
+    # 2. Attacker attempts to register alice@example.com again with a new password
+    second_signup = client.post(
+        "/users/create",
+        json={"email": "alice@example.com", "password": "AttackerPassword!999"},
+    )
+    assert second_signup.status_code == 409
+    assert "already exists" in second_signup.get_json()["error"].lower()
+
+    # 3. Confirm attacker's new password DOES NOT authenticate (401)
+    attacker_login = client.post(
+        "/users/login",
+        json={"email": "alice@example.com", "password": "AttackerPassword!999"},
+    )
+    assert attacker_login.status_code == 401
+
+    # 4. Confirm Alice's original password STILL authenticates (200)
+    alice_login = client.post(
+        "/users/login",
+        json={"email": "alice@example.com", "password": "OriginalPassword!123"},
+    )
+    assert alice_login.status_code == 200
+    assert alice_login.get_json()["id_token"].startswith("csjwt.")
+
+
 def test_valid_bearer_token_accepted(client):
-    """Test accessing protected user info with valid Bearer token header."""
-    response = client.get("/users/info", headers={"Authorization": "Bearer test-token-alice"})
+    """Test accessing protected user info with a cryptographically signed Bearer token."""
+    token = create_session_token("alice")
+    response = client.get("/users/info", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
 
 
 def test_hash_endpoint_with_valid_bearer(client):
-    """Test /hash endpoint with valid Authorization header and secure HMAC."""
+    """Test /hash endpoint with valid signed Authorization header and secure HMAC."""
+    token = create_session_token("bob")
     response = client.post(
         "/hash",
-        headers={"Authorization": "Bearer test-token-bob"},
+        headers={"Authorization": f"Bearer {token}"},
         json={"content": "hello secure world"},
     )
     assert response.status_code == 200
@@ -126,9 +200,10 @@ def test_chat_path_traversal_blocked(client):
     """
     Test Broken Access Control / Path Traversal fix on Firebase chat routes.
     """
+    token = create_session_token("alice")
     response = client.post(
         "/chats/..%2F..%2Fvictim_uid/messages",
-        headers={"Authorization": "Bearer test-token-alice"},
+        headers={"Authorization": f"Bearer {token}"},
         json={"messages": [{"sender": "user", "content": "hi"}]},
     )
     assert response.status_code in (400, 404)
@@ -180,6 +255,18 @@ def test_production_mode_fails_without_secret_key(monkeypatch):
     monkeypatch.setenv("COURSESPHERE_ENV", "production")
     with pytest.raises(RuntimeError, match="COURSESPHERE_SECRET_KEY"):
         get_secret_key()
+
+
+def test_trusted_proxy_cidr_validation(monkeypatch):
+    """
+    Test CIDR Fix: Public 172.x.x.x addresses outside 172.16.0.0/12 must NOT be trusted as proxies.
+    """
+    monkeypatch.setenv("TRUST_PROXY_HEADERS", "1")
+    assert _is_trusted_proxy("172.18.0.5") is True
+    assert _is_trusted_proxy("127.0.0.1") is True
+    assert _is_trusted_proxy("172.1.2.3") is False
+    assert _is_trusted_proxy("172.32.0.1") is False
+    assert _is_trusted_proxy("8.8.8.8") is False
 
 
 def test_brute_force_lockout_on_failed_logins(client):
@@ -320,4 +407,3 @@ def test_multi_replica_shared_state_consistency(client):
         json={"name": "Tampered By Other User"},
     )
     assert forbidden_update.status_code == 403
-
