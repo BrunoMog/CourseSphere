@@ -22,7 +22,8 @@ export default function UserChats() {
           setIsLoggedIn(true);
           try {
             const idToken = await user.getIdToken();
-            const response = await fetch("http://127.0.0.1:5000/theactualbackendlink", {
+            const apiBaseUrl = ((import.meta as any).env && (import.meta as any).env.VITE_API_BASE_URL) || "";
+            const response = await fetch(`${apiBaseUrl}/chats`, {
               method: "GET",
               headers: {
                 "Content-Type": "application/json",
