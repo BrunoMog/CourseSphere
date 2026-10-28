@@ -407,3 +407,56 @@ def test_multi_replica_shared_state_consistency(client):
         json={"name": "Tampered By Other User"},
     )
     assert forbidden_update.status_code == 403
+
+
+def test_firebase_mode_invalid_tokens_and_signup_login_coherence(client, monkeypatch):
+    """
+    Test Firebase Mode Resilience & Coherence:
+    1. When Firebase Admin is active, 3 invalid non-csjwt tokens rejected by `auth.verify_id_token`
+       must return HTTP 401 and MUST NOT trip `CIRCUIT_BREAKERS["firebase"]` into OPEN (503).
+    2. Accounts created when Firebase Admin is active are persisted in `app_users` and can
+       immediately authenticate via `POST /users/login`.
+    """
+    import firebase as fb_module
+
+    class DummyFBUser:
+        def __init__(self, uid):
+            self.uid = uid
+
+    class DummyFBAuth:
+        @staticmethod
+        def create_user(email, password):
+            return DummyFBUser("fb-uid-12345")
+
+        @staticmethod
+        def verify_id_token(token_str):
+            if token_str == "valid-firebase-jwt":
+                return {"uid": "fb-uid-12345"}
+            raise Exception("Certificate/signature verification failed for token")
+
+    monkeypatch.setattr(fb_module, "firebase_app", object())
+    monkeypatch.setattr(fb_module, "auth", DummyFBAuth)
+
+    # 1. Send 3 invalid Firebase JWTs -> all return 401, CircuitBreaker stays CLOSED
+    for i in range(3):
+        bad_resp = client.get("/users/info", headers={"Authorization": f"Bearer bad-fb-jwt-{i}"})
+        assert bad_resp.status_code == 401
+    assert CIRCUIT_BREAKERS["firebase"].state_name == "CLOSED"
+
+    # 2. Signup in Firebase mode persists user to app_users and allows local login + valid FB JWT
+    signup_resp = client.post(
+        "/users/create",
+        json={"email": "fb_user@cornell.edu", "password": "FirebaseMode!123"},
+    )
+    assert signup_resp.status_code == 200
+    assert signup_resp.get_json()["user_id"] == "fb-uid-12345"
+
+    login_resp = client.post(
+        "/users/login",
+        json={"email": "fb_user@cornell.edu", "password": "FirebaseMode!123"},
+    )
+    assert login_resp.status_code == 200
+    assert login_resp.get_json()["user_id"] == "fb-uid-12345"
+
+    valid_fb_resp = client.get("/users/info", headers={"Authorization": "Bearer valid-firebase-jwt"})
+    assert valid_fb_resp.status_code == 200

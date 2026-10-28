@@ -7,9 +7,9 @@ import logging
 from pathlib import Path
 
 try:
-    from backend.security import get_secret_key
+    from backend.security import get_secret_key, sanitize_string
 except ImportError:
-    from security import get_secret_key
+    from security import get_secret_key, sanitize_string
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -83,6 +83,28 @@ def make_prompt(query: str) -> str:
     )
 
 
+def validate_query_parameters(query_type: str, params: object, schema_dict: dict) -> dict:
+    """
+    Validates and sanitizes the `parameters` dictionary returned by the LLM against
+    the allowed parameter keys for `query_type` (defending against Prompt Injection LLM01).
+    """
+    if not isinstance(params, dict):
+        return {}
+    type_schema = schema_dict.get(query_type, {})
+    allowed_keys = (set(type_schema.keys()) if isinstance(type_schema, dict) else set()) | {
+        "query", "department", "semester", "instructor", "course"
+    }
+    clean_params = {}
+    for k, v in params.items():
+        if not isinstance(k, str) or k not in allowed_keys:
+            continue
+        if isinstance(v, str):
+            clean_params[k] = sanitize_string(v, max_length=256)
+        elif isinstance(v, (int, float, bool)):
+            clean_params[k] = v
+    return clean_params
+
+
 def get_query_details(query: str) -> dict:
     client = get_openai_client()
     if not client:
@@ -106,10 +128,15 @@ def get_query_details(query: str) -> dict:
     )
     raw_content = response.choices[0].message.content or "{}"
     parsed = json.loads(raw_content)
-    allowed_types = set(get_query_types().keys()) | {"unsupported"}
+    schema_dict = get_query_types()
+    allowed_types = set(schema_dict.keys()) | {"unsupported"}
     if not isinstance(parsed, dict) or parsed.get("query_type") not in allowed_types:
         return {"query_type": "unsupported", "parameters": {}}
-    return parsed
+    qtype = parsed["query_type"]
+    return {
+        "query_type": qtype,
+        "parameters": validate_query_parameters(qtype, parsed.get("parameters"), schema_dict),
+    }
 
 
 if __name__ == "__main__":
