@@ -52,13 +52,24 @@ def get_openai_client():
         return None
 
 
-def get_query_types():
-    """Loads query types dictionary safely."""
+def get_query_types() -> dict:
+    """Loads query types dictionary safely, normalizing list or dict schemas."""
     path = BASE_DIR / "query_types.json"
     if path.exists():
         try:
             with open(path, "r") as f:
-                return json.load(f)
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    return loaded
+                if isinstance(loaded, list):
+                    normalized = {}
+                    for item in loaded:
+                        if isinstance(item, dict) and "query_type" in item:
+                            normalized[str(item["query_type"])] = (
+                                item.get("parameters") if isinstance(item.get("parameters"), dict) else {}
+                            )
+                    if normalized:
+                        return normalized
         except Exception as exc:
             logging.getLogger(__name__).debug("Optional query_types.json not loaded: %s", exc)
     return {

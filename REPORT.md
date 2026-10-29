@@ -674,6 +674,7 @@ backend/tests/test_endpoints_security.py::test_firebase_mode_invalid_tokens_and_
 | `POST` | `/users/create` | Pública (Cadastro com Credenciais no Body) | Valida formato de e-mail e complexidade de senha (`>= 8` chars), aplica hash `scrypt` e **previne Account Takeover rejeitando e-mails já cadastrados com `HTTP 409 Conflict`**. |
 | `GET/POST` | `/users/info` | **Bearer Token Obrigatório** | Rejeita `?id_token=` na URL e `id_token` no body (`401`); extrai identidade exclusivamente do header `Authorization: Bearer`. |
 | `POST` | `/users/query` | **Bearer Token Obrigatório** | Autenticação exclusiva via header `Authorization: Bearer` (`CWE-306`), delimitadores anti-Prompt Injection (`<user_query>`) e Circuit Breaker OpenAI. |
+| `GET` | `/chats` | **Bearer Token Obrigatório** | Lista exclusivamente as sessões de chat pertencentes ao `uid` autenticado no token Bearer. |
 | `POST` | `/chats/<chat_id>/messages` | **Bearer Token Obrigatório** | Regex anti-Path Traversal (`validate_path_identifier`) + verificação de posse do chat. |
 | `DELETE` | `/chats/<chat_id>` | **Bearer Token Obrigatório** | Regex anti-Path Traversal + verificação de propriedade do chat antes de excluir. |
 | `POST` | `/hash` | **Bearer Token Obrigatório** | Gera código de compartimento via `HMAC-SHA256` com chave secreta e CSPRNG (`secrets`). |

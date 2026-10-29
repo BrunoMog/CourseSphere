@@ -374,3 +374,24 @@ class Firebase:
                 ref.delete()
             except Exception as e:
                 raise Exception(f"Error deleting chat session: {str(e)}")
+
+    @staticmethod
+    def list_chats(uid: str) -> list:
+        uid = validate_path_identifier(uid, "User ID")
+        conn = create_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT chat_id, updated_at FROM user_chats WHERE uid = ? ORDER BY updated_at DESC",
+                (uid,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "title": row["chat_id"],
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(row["updated_at"] or time.time())),
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()

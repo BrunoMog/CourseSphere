@@ -15,14 +15,7 @@ import {
   useTheme
 } from '@mui/material';
 import MenuIcon from '@mui/icons-material/Menu';
-import { Auth, getAuth, onAuthStateChanged } from 'firebase/auth';
-import { FirebaseApp, initializeApp } from 'firebase/app';
-import { Database, getDatabase } from 'firebase/database';
-import firebaseConfig from '../../firebaseConfig';
-
-const app: FirebaseApp = initializeApp(firebaseConfig);
-const database: Database = getDatabase(app);
-const auth: Auth = getAuth();
+import { isUserAuthenticated, signOutUser } from '../../api';
 
 function NavLink(props: { text: string, path: string }) {
   return (
@@ -40,7 +33,7 @@ const NavLinks = ({ isLoggedIn }: { isLoggedIn: boolean }) => (
       <NavLink text="Login" path="/login" />
     ) : (
       <Button variant="outlined" onClick={() => {
-        auth.signOut();
+        signOutUser();
         window.location.replace("/");
       }}>
         Logout
@@ -50,13 +43,11 @@ const NavLinks = ({ isLoggedIn }: { isLoggedIn: boolean }) => (
 );
 
 export default function Nav() {
-  const [loggedIn, setLoggedIn] = useState<boolean>(false);
+  const [loggedIn, setLoggedIn] = useState<boolean>(isUserAuthenticated());
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
 
   useEffect(() => {
-    onAuthStateChanged(auth, (user) => {
-      setLoggedIn(!!user);
-    });
+    setLoggedIn(isUserAuthenticated());
   }, []);
 
   const toggleDrawer = (open: boolean) => (event: any) => {
@@ -79,7 +70,7 @@ export default function Nav() {
           <ListItemText primary="Login" />
         </ListItem>
       ) : (
-        <ListItem button onClick={() => { auth.signOut(); window.location.href = '/'; }}>
+        <ListItem button onClick={() => { signOutUser(); window.location.href = '/'; }}>
           <ListItemText primary="Logout" />
         </ListItem>
       )}

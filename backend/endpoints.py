@@ -590,6 +590,25 @@ def generate_message_id():
         return error_response("Internal error generating message identifier.", 500)
 
 
+@app.route("/chats", methods=["GET"])
+def list_user_chats():
+    token, err = get_auth_token()
+    if not token:
+        return error_response(err, 401)
+
+    decoded, auth_err = verify_request_token(token)
+    if auth_err:
+        return error_response(auth_err[0], auth_err[1])
+
+    try:
+        user_id = decoded.get("uid")
+        chats = Firebase.list_chats(user_id)
+        return jsonify({"chats": chats}), 200
+    except Exception as e:
+        logger.error(f"Error listing user chats: {e}")
+        return error_response("Failed to retrieve chat sessions.", 400)
+
+
 @app.route("/chats/<chat_id>/messages", methods=["POST"])
 def save_chat(chat_id):
     token, err = get_auth_token()

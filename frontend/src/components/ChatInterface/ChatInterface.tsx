@@ -49,7 +49,7 @@ export default function ChatInterface() {
     const userMessage: Message = {
       sender: 'user',
       content: query,
-      messageID: h(query),
+      messageID: (await h(query)) || 'msg_user',
       timestamp: new Date().toISOString(),
     };
 
@@ -58,7 +58,7 @@ export default function ChatInterface() {
       const botMessage: Message = {
         sender: 'bot',
         content: { botResponse, newRecommendations },
-        messageID: h({botResponse, newRecommendations}),
+        messageID: (await h({botResponse, newRecommendations})) || 'msg_bot',
         timestamp: new Date().toISOString(),
       };
 

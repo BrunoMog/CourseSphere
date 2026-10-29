@@ -1,51 +1,41 @@
 import { useEffect, useState } from 'react';
 import { List, ListItem, ListItemText, Typography } from '@mui/material';
-import { getAuth, onAuthStateChanged } from 'firebase/auth';
-import { getDatabase } from 'firebase/database';
 import { toast } from 'react-toastify';
-import { initializeApp } from "firebase/app";
-import firebaseConfig from "../../firebaseConfig";
-
-const app = initializeApp(firebaseConfig);
-const database = getDatabase(app);
-const auth = getAuth(app);
+import { getActiveIdToken, isUserAuthenticated } from '../../api';
 
 export default function UserChats() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(isUserAuthenticated());
 
   useEffect(() => {
     const fetchChats = async () => {
-      onAuthStateChanged(auth, async (user) => {
-        if (user) {
-          setIsLoggedIn(true);
-          try {
-            const idToken = await user.getIdToken();
-            const apiBaseUrl = ((import.meta as any).env && (import.meta as any).env.VITE_API_BASE_URL) || "";
-            const response = await fetch(`${apiBaseUrl}/chats`, {
-              method: "GET",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${idToken}`,
-              },
-            });
+      if (isUserAuthenticated()) {
+        setIsLoggedIn(true);
+        try {
+          const idToken = await getActiveIdToken();
+          const apiBaseUrl = ((import.meta as any).env && (import.meta as any).env.VITE_API_BASE_URL) || "";
+          const response = await fetch(`${apiBaseUrl}/chats`, {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${idToken}`,
+            },
+          });
 
-            if (!response.ok) {
-              throw new Error('Network response was not ok');
-            }
-
-            const data = await response.json();
-            setChats(data.chats); 
-            toast.success("Successfully fetched your chats!");
-          } catch (error) {
-            toast.error(`Failed to fetch your chats: ${error}`);
+          if (!response.ok) {
+            throw new Error('Network response was not ok');
           }
-        } else {
-          setIsLoggedIn(false);
+
+          const data = await response.json();
+          setChats(data.chats || []);
+        } catch (error) {
+          toast.error(`Failed to fetch your chats: ${error}`);
         }
-        setLoading(false);
-      });
+      } else {
+        setIsLoggedIn(false);
+      }
+      setLoading(false);
     };
 
     fetchChats();

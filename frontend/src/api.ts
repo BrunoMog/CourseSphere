@@ -2,7 +2,7 @@ import $ from 'jquery';
 import firebaseConfig from "./firebaseConfig";
 import { FirebaseApp, initializeApp } from "firebase/app";
 import { Database, getDatabase } from "firebase/database";
-import { Auth, getAuth, onAuthStateChanged, signInWithEmailAndPassword } from "firebase/auth";
+import { Auth, getAuth } from "firebase/auth";
 import { toast } from "react-toastify";
 
 const app: FirebaseApp = initializeApp(firebaseConfig);
@@ -10,7 +10,37 @@ const database: Database = getDatabase(app);
 const auth: Auth = getAuth();
 
 const API_BASE_URL: string = ((import.meta as any).env && (import.meta as any).env.VITE_API_BASE_URL) || "";
+const SESSION_TOKEN_KEY = "cs_id_token";
+const SESSION_EMAIL_KEY = "cs_user_email";
 
+function getStoredToken(): string | null {
+  return localStorage.getItem(SESSION_TOKEN_KEY);
+}
+
+async function getActiveIdToken(): Promise<string | null> {
+  const localToken = getStoredToken();
+  if (localToken) {
+    return localToken;
+  }
+  if (auth.currentUser) {
+    return await auth.currentUser.getIdToken();
+  }
+  return null;
+}
+
+function isUserAuthenticated(): boolean {
+  return Boolean(getStoredToken() || auth.currentUser);
+}
+
+function signOutUser(): void {
+  localStorage.removeItem(SESSION_TOKEN_KEY);
+  localStorage.removeItem(SESSION_EMAIL_KEY);
+  try {
+    auth.signOut();
+  } catch {
+    // Ignore if Firebase Auth is unconfigured
+  }
+}
 
 async function createUser(email: string, password: string) {
   const response = await fetch(`${API_BASE_URL}/users/create`, {
@@ -22,23 +52,43 @@ async function createUser(email: string, password: string) {
     body: JSON.stringify({ email, password })
   });
   const json = await response.json();
+  if (!response.ok) {
+    throw new Error(json.error || `Sign up failed (${response.status})`);
+  }
+  return json;
+}
+
+async function loginBackend(email: string, password: string) {
+  const response = await fetch(`${API_BASE_URL}/users/login`, {
+    method: 'POST',
+    mode: "cors",
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ email, password })
+  });
+  const json = await response.json();
+  if (!response.ok || !json.id_token) {
+    throw new Error(json.error || `Login failed (${response.status})`);
+  }
+  localStorage.setItem(SESSION_TOKEN_KEY, json.id_token);
+  localStorage.setItem(SESSION_EMAIL_KEY, json.email || email);
   return json;
 }
 
 
 function performSignup() {
-  const email: string = String($("#signup-email-input").val() || "");
+  const email: string = String($("#signup-email-input").val() || "").trim();
   const password: string = String($("#signup-password-input").val() || "");
 
   createUser(email, password)
+    .then(() => loginBackend(email, password))
     .then(() => {
-      signInWithEmailAndPassword(auth, email, password)
-        .then(() => {
-          window.location.replace("/");
-        });
+      toast.success("Account created successfully!");
+      window.location.replace("/");
     })
-    .catch((e) => {
-      toast(`Sign up failed: ${e}`, {
+    .catch((e: Error) => {
+      toast.error(`Sign up failed: ${e.message || e}`, {
         position: "top-right",
         hideProgressBar: true,
         closeOnClick: true,
@@ -51,17 +101,19 @@ function performSignup() {
 }
 
 /**
- * This function performs the user login transaction with firebase.
+ * Performs user authentication against the CourseSphere backend (`/users/login`)
+ * and stores the signed HMAC session token (`csjwt.<payload>.<sig>`).
  */
 function performLogin() {
-  const email: string = String($("#login-email-input").val() || "");
+  const email: string = String($("#login-email-input").val() || "").trim();
   const password: string = String($("#login-password-input").val() || "");
-  signInWithEmailAndPassword(auth, email, password)
+  loginBackend(email, password)
     .then(() => {
+      toast.success("Logged in successfully!");
       window.location.replace("/");
     })
-    .catch((e) => {
-      toast.error(`Login failed: ${e.message}`);
+    .catch((e: Error) => {
+      toast.error(`Login failed: ${e.message || e}`);
     });
 }
 
@@ -78,44 +130,43 @@ async function setProfileInfoIfLoggedIn(
   setCourses: Function,
   setAbout: Function
 ) {
-  onAuthStateChanged(auth, async (user) => {
-    if (!ensureUserLoggedIn()) return;
-    const idToken = await user?.getIdToken();
+  if (!ensureUserLoggedIn()) return;
+  const idToken = await getActiveIdToken();
+  if (!idToken) return;
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/users/info`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${idToken}`
-        }
-      });
+  try {
+    const response = await fetch(`${API_BASE_URL}/users/info`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${idToken}`
+      }
+    });
 
-      const data = await response.json();
+    const data = await response.json();
 
-      if (data["majors"]) {
-        setMajors(data["majors"]);
-      }
-      if (data["minors"]) {
-        setMinors(data["minors"]);
-      }
-      if (data["year"]) {
-        setYear(data["year"]);
-      }
-      if (data["college"]) {
-        setCollege(data["college"]);
-      }
-      if (data["courses"]) {
-        setCourses(data["courses"]);
-      }
-      if (data["about"]) {
-        $("#info-output").val(data["about"]);
-        setAbout(data["about"]);
-      }
-    } catch (e) {
-      toast.error(`Failed to fetch data: ${e}`);
+    if (data["majors"]) {
+      setMajors(data["majors"]);
     }
-  });
+    if (data["minors"]) {
+      setMinors(data["minors"]);
+    }
+    if (data["year"]) {
+      setYear(data["year"]);
+    }
+    if (data["college"]) {
+      setCollege(data["college"]);
+    }
+    if (data["courses"]) {
+      setCourses(data["courses"]);
+    }
+    if (data["about"]) {
+      $("#info-output").val(data["about"]);
+      setAbout(data["about"]);
+    }
+  } catch (e) {
+    toast.error(`Failed to fetch data: ${e}`);
+  }
 }
 
 /**
@@ -123,11 +174,10 @@ async function setProfileInfoIfLoggedIn(
  */
 async function saveProfileChanges(majors: string[], minors: string[], courses: string[]) {
   if (!ensureUserLoggedIn()) return;
-  const user = auth.currentUser;
   const about = $("#info-output").val();
   const year = $("#year-output").val();
   const college = $("#college-output").val();
-  const idToken = await user?.getIdToken();
+  const idToken = await getActiveIdToken();
 
   const data = {
     majors: majors,
@@ -160,8 +210,7 @@ async function saveProfileChanges(majors: string[], minors: string[], courses: s
  * Fixed missing 'await' on user?.getIdToken() and removed unsanitized query reflection.
  */
 async function fetchCourseSphereResponse(query: string) {
-  const user = auth.currentUser;
-  const idToken = await user?.getIdToken();
+  const idToken = await getActiveIdToken();
   const data = { query };
   const response = await fetch(`${API_BASE_URL}/users/query`, {
     method: "POST",
@@ -171,7 +220,13 @@ async function fetchCourseSphereResponse(query: string) {
     },
     body: JSON.stringify(data)
   })
-    .then(response => response.json())
+    .then(async response => {
+      const json = await response.json();
+      if (!response.ok) {
+        throw new Error(json.error || `Request failed (${response.status})`);
+      }
+      return json;
+    })
     .then(result => {
       toast.success("Successfully retrieved bot response!");
       return {
@@ -183,7 +238,7 @@ async function fetchCourseSphereResponse(query: string) {
       console.error("Failed to fetch bot response:", error);
       toast.error(`Failed to fetch bot response: ${error.message}`);
       return {
-        botResponse: "Unsupported Query",
+        botResponse: "Please log in first to query CourseSphere.",
         newRecommendations: []
       };
     });
@@ -191,9 +246,8 @@ async function fetchCourseSphereResponse(query: string) {
 }
 
 function ensureUserLoggedIn(): boolean {
-  const user = auth.currentUser;
-  if (user == null) {
-    alert("Not logged in");
+  if (!isUserAuthenticated()) {
+    toast.warning("Please log in to continue.");
     return false;
   }
   return true;
@@ -203,8 +257,7 @@ function ensureUserLoggedIn(): boolean {
 async function saveCourseSphereChat(chatId: string, messages: Message[]) {
   if (!ensureUserLoggedIn()) return;
 
-  const user = auth.currentUser;
-  const idToken = await user?.getIdToken();
+  const idToken = await getActiveIdToken();
 
   const response = await fetch(`${API_BASE_URL}/chats/${encodeURIComponent(chatId)}/messages`, {
     method: 'POST',
@@ -224,15 +277,14 @@ async function saveCourseSphereChat(chatId: string, messages: Message[]) {
 
   const data = await response.json();
   if (!response.ok) {
-    alert(data.error || 'Error saving messages');
+    toast.error(data.error || 'Error saving messages');
   }
 }
 
 
 async function updateCourseSphereChat(chatId: string, messageId: string, updatedContent: string) {
   if (!ensureUserLoggedIn()) return;
-  const user = auth.currentUser;
-  const idToken = await user?.getIdToken();
+  const idToken = await getActiveIdToken();
 
   const response = await fetch(`${API_BASE_URL}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
     method: 'PUT',
@@ -247,14 +299,13 @@ async function updateCourseSphereChat(chatId: string, messageId: string, updated
 
   const data = await response.json();
   if (!response.ok) {
-    alert(data.error);
+    toast.error(data.error);
   }
 }
 
 async function deleteCourseSphereChat(chatId: string, messageId: string) {
   if (!ensureUserLoggedIn()) return;
-  const user = auth.currentUser;
-  const idToken = await user?.getIdToken();
+  const idToken = await getActiveIdToken();
 
   const response = await fetch(`${API_BASE_URL}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
     method: 'DELETE',
@@ -266,15 +317,14 @@ async function deleteCourseSphereChat(chatId: string, messageId: string) {
 
   const data = await response.json();
   if (!response.ok) {
-    alert(data.error);
+    toast.error(data.error);
   }
 }
 
 async function h(data: any): Promise<string | undefined> {
-  if (!ensureUserLoggedIn()) return;
+  if (!ensureUserLoggedIn()) return "msg_anonymous";
 
-  const user = auth.currentUser;
-  const idToken = await user?.getIdToken();
+  const idToken = await getActiveIdToken();
 
   const response = await fetch(`${API_BASE_URL}/hash`, {
     method: 'POST',
@@ -304,6 +354,9 @@ export {
   saveCourseSphereChat,
   updateCourseSphereChat,
   deleteCourseSphereChat,
+  getActiveIdToken,
+  isUserAuthenticated,
+  signOutUser,
   h,
   database
 };
