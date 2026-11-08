@@ -1,0 +1,226 @@
+Run started:2026-10-27 23:04:09.763498+00:00
+
+Test results:
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/blueprints/courses.py:30:29
+29	    """
+30	    course = execute_query(f"SELECT * FROM courses WHERE id = {course_id}").fetchall()
+31	    if course:
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/blueprints/courses.py:47:10
+46	    course = execute_query(
+47	        f"SELECT description FROM course_descriptions WHERE id = {course_id}"
+48	    ).fetchall()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/blueprints/courses.py:64:10
+63	    courses = execute_query(
+64	        f"SELECT * FROM courses WHERE section_id = {section_id}"
+65	    ).fetchall()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/blueprints/courses.py:80:10
+79	    courses = execute_query(
+80	        f"SELECT * FROM courses WHERE semester = '{semester}'"
+81	    ).fetchall()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/blueprints/courses.py:96:10
+95	    courses = execute_query(
+96	        f"SELECT * FROM courses WHERE department = '{department}'"
+97	    ).fetchall()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/blueprints/courses.py:112:10
+111	    courses = execute_query(
+112	        f"SELECT * FROM courses WHERE instructor = '{instructor}'"
+113	    ).fetchall()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:169:18
+168	        """
+169	        query = f"SELECT EXISTS(SELECT 1 FROM {self.table_names['posts']} WHERE url = ?)"
+170	        self.cursor.execute(query, (post_url,))
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:180:25
+179	        """
+180	        insert_sql = f"""
+181	        INSERT INTO {self.table_names['posts']} (subreddit, title, url, author, score, num_comments, created_utc, selftext, permalink)
+182	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+183	        """
+184	        self.cursor.execute(insert_sql, (
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:196:25
+195	        """
+196	        insert_sql = f"""
+197	        INSERT INTO {self.table_names['comments']} (post_id, subreddit, username, user_id, parent_id, score, created_utc, body, permalink)
+198	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+199	        """
+200	        self.cursor.execute(insert_sql, (
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:212:21
+211	        """
+212	        read_sql = f"SELECT * FROM {self.table_names['posts']}"
+213	        return pd.read_sql_query(read_sql, self.conn)
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:221:21
+220	        """
+221	        read_sql = f"SELECT * FROM {self.table_names['comments']}"
+222	        return pd.read_sql_query(read_sql, self.conn)
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:232:32
+231	        # Delete associated comments first
+232	        delete_comments_sql = f"DELETE FROM {self.table_names['comments']} WHERE post_id = ?"
+233	        self.cursor.execute(delete_comments_sql, (post_id,))
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:239:23
+238	        values.append(post_id)
+239	        update_sql = f"UPDATE {self.table_names['posts']} SET {fields} WHERE post_id = ?"
+240	        self.cursor.execute(update_sql, values)
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:250:32
+249	        # Delete associated comments first
+250	        delete_comments_sql = f"DELETE FROM {self.table_names['comments']} WHERE post_id = ?"
+251	        self.cursor.execute(delete_comments_sql, (post_id,))
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/cornell-course-sphere-data/reddit-data/data-migrations.py:254:28
+253	        # Delete the post
+254	        delete_post_sql = f"DELETE FROM {self.table_names['posts']} WHERE post_id = ?"
+255	        self.cursor.execute(delete_post_sql, (post_id,))
+
+--------------------------------------------------
+>> Issue: [B201:flask_debug_true] A Flask app appears to be run with debug=True, which exposes the Werkzeug debugger and allows the execution of arbitrary code.
+   Severity: High   Confidence: Medium
+   CWE: CWE-94 (https://cwe.mitre.org/data/definitions/94.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b201_flask_debug_true.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/endpoints.py:108:4
+107	if __name__ == '__main__':
+108	    app.run(debug=True)
+
+--------------------------------------------------
+>> Issue: [B311:blacklist] Standard pseudo-random generators are not suitable for security/cryptographic purposes.
+   Severity: Low   Confidence: High
+   CWE: CWE-330 (https://cwe.mitre.org/data/definitions/330.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/main.py:15:38
+14	def hashFunction(data) -> str:
+15	    x = h.sha256((str(data) + ''.join(rv.choices(s.ascii_letters + s.digits, k=rv.randint(5,9)))).encode()).hexdigest()
+16	    w = str(sum(np.random.poisson(lam=i) for i in range(rv.randint(1, 5))))
+
+--------------------------------------------------
+>> Issue: [B311:blacklist] Standard pseudo-random generators are not suitable for security/cryptographic purposes.
+   Severity: Low   Confidence: High
+   CWE: CWE-330 (https://cwe.mitre.org/data/definitions/330.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/main.py:15:79
+14	def hashFunction(data) -> str:
+15	    x = h.sha256((str(data) + ''.join(rv.choices(s.ascii_letters + s.digits, k=rv.randint(5,9)))).encode()).hexdigest()
+16	    w = str(sum(np.random.poisson(lam=i) for i in range(rv.randint(1, 5))))
+
+--------------------------------------------------
+>> Issue: [B311:blacklist] Standard pseudo-random generators are not suitable for security/cryptographic purposes.
+   Severity: Low   Confidence: High
+   CWE: CWE-330 (https://cwe.mitre.org/data/definitions/330.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/main.py:16:56
+15	    x = h.sha256((str(data) + ''.join(rv.choices(s.ascii_letters + s.digits, k=rv.randint(5,9)))).encode()).hexdigest()
+16	    w = str(sum(np.random.poisson(lam=i) for i in range(rv.randint(1, 5))))
+17	    b = st.token_hex(16) 
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: /home/bruno/desafio_tecnico_vlab/CourseSphere/backend/query_manager.py:44:8
+43	        """
+44	        assert (query is not None)
+45	        
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 905
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 4
+		Medium: 15
+		High: 1
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 15
+		Medium: 1
+		High: 4
+Files skipped (0):

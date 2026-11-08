@@ -120,10 +120,8 @@ class DataMigrations:
         """
         Drops the reddit_posts and reddit_comments tables if they exist.
         """
-        drop_posts_sql = f"DROP TABLE IF EXISTS {self.table_names['posts']};"
-        drop_comments_sql = f"DROP TABLE IF EXISTS {self.table_names['comments']};"
-        self.cursor.execute(drop_posts_sql)
-        self.cursor.execute(drop_comments_sql)
+        self.cursor.execute("DROP TABLE IF EXISTS reddit_posts;")
+        self.cursor.execute("DROP TABLE IF EXISTS reddit_comments;")
         self.conn.commit()
 
     def populate_database(self, subreddit_name: str, search_term: str = None,
@@ -159,6 +157,18 @@ class DataMigrations:
         print(f"Populating database took with {posts_count} posts "
               f"and {comment_count} comments took {duration:.2f} seconds.")
 
+    ALLOWED_POST_COLUMNS = {
+        "subreddit": "subreddit = ?",
+        "title": "title = ?",
+        "url": "url = ?",
+        "author": "author = ?",
+        "score": "score = ?",
+        "num_comments": "num_comments = ?",
+        "created_utc": "created_utc = ?",
+        "selftext": "selftext = ?",
+        "permalink": "permalink = ?",
+    }
+
     def post_exists(self, post_url: str) -> bool:
         """
         Check if a post already exists in the database.
@@ -166,7 +176,7 @@ class DataMigrations:
         :param post_url: The URL of the post to check.
         :return: True if the post exists, False otherwise.
         """
-        query = f"SELECT EXISTS(SELECT 1 FROM {self.table_names['posts']} WHERE url = ?)"
+        query = "SELECT EXISTS(SELECT 1 FROM reddit_posts WHERE url = ?)"
         self.cursor.execute(query, (post_url,))
         return self.cursor.fetchone()[0] == 1
 
@@ -177,8 +187,8 @@ class DataMigrations:
         :param post: RedditPost object containing post data.
         :return: The ID of the inserted post.
         """
-        insert_sql = f"""
-        INSERT INTO {self.table_names['posts']} (subreddit, title, url, author, score, num_comments, created_utc, selftext, permalink)
+        insert_sql = """
+        INSERT INTO reddit_posts (subreddit, title, url, author, score, num_comments, created_utc, selftext, permalink)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         self.cursor.execute(insert_sql, (
@@ -193,8 +203,8 @@ class DataMigrations:
 
         :param comment: RedditComment object containing comment data.
         """
-        insert_sql = f"""
-        INSERT INTO {self.table_names['comments']} (post_id, subreddit, username, user_id, parent_id, score, created_utc, body, permalink)
+        insert_sql = """
+        INSERT INTO reddit_comments (post_id, subreddit, username, user_id, parent_id, score, created_utc, body, permalink)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         self.cursor.execute(insert_sql, (
@@ -209,7 +219,7 @@ class DataMigrations:
 
         :return: A DataFrame containing all Reddit posts.
         """
-        read_sql = f"SELECT * FROM {self.table_names['posts']}"
+        read_sql = "SELECT * FROM reddit_posts"
         return pd.read_sql_query(read_sql, self.conn)
 
     def read_comments(self) -> pd.DataFrame:
@@ -218,26 +228,45 @@ class DataMigrations:
 
         :return: A DataFrame containing all Reddit comments.
         """
-        read_sql = f"SELECT * FROM {self.table_names['comments']}"
+        read_sql = "SELECT * FROM reddit_comments"
         return pd.read_sql_query(read_sql, self.conn)
 
     def update_post(self, post_id: int, **kwargs: Any) -> None:
         """
-        Update a Reddit post in the database.
+        Update a Reddit post in the database after validating column names against an allowlist.
 
         :param post_id: The ID of the post to update.
         :param kwargs: The fields to update.
         """
-        # Delete associated comments first
-        delete_comments_sql = f"DELETE FROM {self.table_names['comments']} WHERE post_id = ?"
-        self.cursor.execute(delete_comments_sql, (post_id,))
+        invalid_cols = set(kwargs.keys()) - set(self.ALLOWED_POST_COLUMNS.keys())
+        if invalid_cols:
+            raise ValueError(f"Disallowed update columns: {invalid_cols}")
 
-        # Update the post
-        fields = ', '.join([f"{k} = ?" for k in kwargs.keys()])
-        values = list(kwargs.values())
-        values.append(post_id)
-        update_sql = f"UPDATE {self.table_names['posts']} SET {fields} WHERE post_id = ?"
-        self.cursor.execute(update_sql, values)
+        self.cursor.execute("DELETE FROM reddit_comments WHERE post_id = ?", (post_id,))
+
+        if kwargs:
+            clauses = [self.ALLOWED_POST_COLUMNS[k] for k in kwargs.keys()]
+            values = list(kwargs.values())
+            values.append(post_id)
+            for clause, val in zip(clauses, kwargs.values()):
+                if clause == "subreddit = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET subreddit = ? WHERE post_id = ?", (val, post_id))
+                elif clause == "title = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET title = ? WHERE post_id = ?", (val, post_id))
+                elif clause == "url = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET url = ? WHERE post_id = ?", (val, post_id))
+                elif clause == "author = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET author = ? WHERE post_id = ?", (val, post_id))
+                elif clause == "score = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET score = ? WHERE post_id = ?", (val, post_id))
+                elif clause == "num_comments = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET num_comments = ? WHERE post_id = ?", (val, post_id))
+                elif clause == "created_utc = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET created_utc = ? WHERE post_id = ?", (val, post_id))
+                elif clause == "selftext = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET selftext = ? WHERE post_id = ?", (val, post_id))
+                elif clause == "permalink = ?":
+                    self.cursor.execute("UPDATE reddit_posts SET permalink = ? WHERE post_id = ?", (val, post_id))
         self.conn.commit()
 
     def delete_post(self, post_id: int) -> None:
@@ -246,13 +275,8 @@ class DataMigrations:
 
         :param post_id: The ID of the post to delete.
         """
-        # Delete associated comments first
-        delete_comments_sql = f"DELETE FROM {self.table_names['comments']} WHERE post_id = ?"
-        self.cursor.execute(delete_comments_sql, (post_id,))
-
-        # Delete the post
-        delete_post_sql = f"DELETE FROM {self.table_names['posts']} WHERE post_id = ?"
-        self.cursor.execute(delete_post_sql, (post_id,))
+        self.cursor.execute("DELETE FROM reddit_comments WHERE post_id = ?", (post_id,))
+        self.cursor.execute("DELETE FROM reddit_posts WHERE post_id = ?", (post_id,))
         self.conn.commit()
 
 

@@ -1,0 +1,123 @@
+services:
+  # -------------------------------------------------------
+  # Backend Replica 1 (WSGI Gunicorn + Non-root + Shared State)
+  # -------------------------------------------------------
+  backend-1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: coursesphere-backend-1
+    environment:
+      - INSTANCE_ID=backend-1
+      - FLASK_DEBUG=0
+      - PORT=5000
+      - COURSESPHERE_DB_PATH=/data/roster_reviews.sqlite.db
+      - SEED_SHARED_DB=1
+      - COURSESPHERE_ENV=${COURSESPHERE_ENV:-development}
+      - COURSESPHERE_SECRET_KEY=${COURSESPHERE_SECRET_KEY:-}
+      - TRUST_PROXY_HEADERS=1
+      - ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://127.0.0.1,http://127.0.0.1:80
+    volumes:
+      - shared-db-data:/data
+    restart: unless-stopped
+    networks:
+      - coursesphere-net
+
+  # -------------------------------------------------------
+  # Backend Replica 2 (WSGI Gunicorn + Non-root + Shared State)
+  # -------------------------------------------------------
+  backend-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: coursesphere-backend-2
+    environment:
+      - INSTANCE_ID=backend-2
+      - FLASK_DEBUG=0
+      - PORT=5000
+      - COURSESPHERE_DB_PATH=/data/roster_reviews.sqlite.db
+      - SEED_SHARED_DB=1
+      - COURSESPHERE_ENV=${COURSESPHERE_ENV:-development}
+      - COURSESPHERE_SECRET_KEY=${COURSESPHERE_SECRET_KEY:-}
+      - TRUST_PROXY_HEADERS=1
+      - ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://127.0.0.1,http://127.0.0.1:80
+    volumes:
+      - shared-db-data:/data
+    restart: unless-stopped
+    networks:
+      - coursesphere-net
+
+  # -------------------------------------------------------
+  # Frontend Static Application (Multi-stage Vite + Nginx Non-Root)
+  # -------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: coursesphere-frontend
+    restart: unless-stopped
+    networks:
+      - coursesphere-net
+
+  # -------------------------------------------------------
+  # Reverse Proxy & Load Balancer Gateway (Nginx)
+  # -------------------------------------------------------
+  load-balancer:
+    image: nginx:alpine-slim
+    container_name: coursesphere-load-balancer
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend-1
+      - backend-2
+      - frontend
+    restart: unless-stopped
+    networks:
+      - coursesphere-net
+
+  # -------------------------------------------------------
+  # SRE Observability: Prometheus Metrics Scraper
+  # -------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: coursesphere-prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - backend-1
+      - backend-2
+    restart: unless-stopped
+    networks:
+      - coursesphere-net
+
+  # -------------------------------------------------------
+  # SRE Observability: Grafana Visual Dashboards
+  # -------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: coursesphere-grafana
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./docker/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - coursesphere-net
+
+volumes:
+  shared-db-data:
+
+networks:
+  coursesphere-net:
+    driver: bridge

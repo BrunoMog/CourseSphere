@@ -41,7 +41,8 @@ const SignUpBox = () => {
         onChange = {(e) => setEmail(e.target.value)}
       />
       <br/>
-      <TextField id="signup-password-input" label="Password" variant="filled"
+      <TextField id="signup-password-input" label="Password (min. 8 chars)" variant="filled"
+        type="password"
         onChange = {(e) => setPassword(e.target.value)}
       />
       <br/>

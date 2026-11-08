@@ -1,8 +1,12 @@
 *config.json
-
+*credentials.json
 *.idea*
 *.vscode*
-
 *.db*
-
 .DS_Store
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/

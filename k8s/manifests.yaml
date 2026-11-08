@@ -1,0 +1,284 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: coursesphere
+  labels:
+    app.kubernetes.io/name: coursesphere
+    security.coursesphere.io/tier: production
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coursesphere-config
+  namespace: coursesphere
+data:
+  FLASK_DEBUG: "0"
+  PORT: "5000"
+  ALLOWED_ORIGINS: "https://coursesphere.internal,http://localhost"
+  RATE_LIMIT_PER_MINUTE: "60"
+  MAX_FAILED_AUTH_ATTEMPTS: "5"
+  AUTH_LOCKOUT_SECONDS: "300"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: coursesphere-secrets
+  namespace: coursesphere
+type: Opaque
+stringData:
+  # In production cloud environments, managed via ExternalSecrets / AWS Secrets Manager / HashiCorp Vault
+  COURSESPHERE_SECRET_KEY: "replace-via-vault-or-external-secrets-operator"
+  OPENAI_API_KEY: "replace-via-vault-or-external-secrets-operator"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coursesphere-backend
+  namespace: coursesphere
+  labels:
+    app: coursesphere-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: coursesphere-backend
+  template:
+    metadata:
+      labels:
+        app: coursesphere-backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "5000"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: backend
+          image: coursesphere-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: coursesphere-config
+            - secretRef:
+                name: coursesphere-secrets
+          env:
+            - name: INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coursesphere-backend-svc
+  namespace: coursesphere
+spec:
+  selector:
+    app: coursesphere-backend
+  ports:
+    - protocol: TCP
+      port: 5000
+      targetPort: 5000
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coursesphere-frontend
+  namespace: coursesphere
+  labels:
+    app: coursesphere-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: coursesphere-frontend
+  template:
+    metadata:
+      labels:
+        app: coursesphere-frontend
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+      containers:
+        - name: frontend
+          image: coursesphere-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coursesphere-frontend-svc
+  namespace: coursesphere
+spec:
+  selector:
+    app: coursesphere-frontend
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: coursesphere-backend-hpa
+  namespace: coursesphere
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: coursesphere-backend
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: coursesphere-backend-netpol
+  namespace: coursesphere
+spec:
+  podSelector:
+    matchLabels:
+      app: coursesphere-backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: coursesphere-frontend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 5000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: coursesphere-ingress
+  namespace: coursesphere
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  rules:
+    - host: coursesphere.local
+      http:
+        paths:
+          - path: /courses
+            pathType: Prefix
+            backend:
+              service:
+                name: coursesphere-backend-svc
+                port:
+                  number: 5000
+          - path: /users
+            pathType: Prefix
+            backend:
+              service:
+                name: coursesphere-backend-svc
+                port:
+                  number: 5000
+          - path: /chats
+            pathType: Prefix
+            backend:
+              service:
+                name: coursesphere-backend-svc
+                port:
+                  number: 5000
+          - path: /hash
+            pathType: Prefix
+            backend:
+              service:
+                name: coursesphere-backend-svc
+                port:
+                  number: 5000
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: coursesphere-backend-svc
+                port:
+                  number: 5000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: coursesphere-frontend-svc
+                port:
+                  number: 80
