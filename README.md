@@ -1,9 +1,27 @@
 # 🎓 CourseSphere — Plataforma de Recomendação e Gestão de Cursos
 > **Projeto de Avaliação Técnica — Bolsista de Segurança de Aplicações e Confiabilidade (AppSec / SRE)**
 
+---
+
+## 📌 Contexto e Propósito deste Repositório
+
+Este repositório foi desenvolvido como resolução prática para a etapa de **Desafio Técnico** do processo seletivo para a posição de **Bolsista de Segurança de Aplicações e Confiabilidade (AppSec / SRE)**. 
+
+O projeto original de referência é o [**CourseSphere**](https://github.com/LambdaAK/CourseSphere) (desenvolvido originalmente por estudantes da Universidade Cornell como uma plataforma de avaliação, busca e recomendação inteligente de cursos). A aplicação base continha diversas vulnerabilidades críticas de segurança de aplicações (OWASP Top 10), ausência de controles de acesso e autenticação segura, ausência de instrumentação de observabilidade e métricas, além de limitações arquiteturais de resiliência e concorrência.
+
+### Objetivos Atendidos neste Repositório:
+1. **Auditoria Completa de Segurança (Pentest Web)**: Mapeamento detalhado e remediação na causa raiz de **9 vulnerabilidades documentadas** (`PT-001` a `PT-009`), eliminando 100% dos alertas de SAST (Bandit e Semgrep) e SCA (pip-audit, Dependabot e auditorias de dependências NPM);
+2. **Hardening Proativo em Múltiplas Camadas**: Implementação de controles defensivos ausentes na especificação original (Rate Limiting e Lockout contra força bruta, mitigação estrita de spoofing de IP via CIDR RFC 1918, hashing de senhas com algoritmo *memory-hard* `scrypt`, proteção CSRF/Origin em APIs JSON, Content-Security-Policy e cabeçalhos de segurança HTTP);
+3. **Engenharia de Confiabilidade (SRE) & Resiliência**: Implementação de logs estruturados em JSON correlacionados por `request_id`, probes de saúde ativos (`/health`), métricas Prometheus (`/metrics`) com controle de cardinalidade e agregação atômica multi-worker, definição formal de **SLIs, SLOs e Error Budget**, além de padrões de tolerância a falhas (**Circuit Breaker** e **Retry com Exponential Backoff**);
+4. **Infraestrutura Escalável e Balanceamento de Carga**: Conteinerização multi-stage e não-root (`USER appuser` / `USER nginx`), balanceador de carga Nginx com distribuição Round-Robin entre réplicas do backend conectadas a volume SQLite WAL compartilhado, e manifestos Kubernetes Cloud-Native prontos para produção (`k8s/manifests.yaml`).
+
+Para detalhes completos de metodologia, relatórios de auditoria, modelagem de ameaças STRIDE e conformidade regulatória (ISO 27001, SOC 2, PCI DSS e LGPD), consulte o [**REPORT.md**](REPORT.md).
+
+---
+
 CourseSphere é uma aplicação web composta por frontend em React (Vite/TypeScript) e backend em Python (Flask/SQLite), integrada a serviços de inteligência (OpenAI) e autenticação (Firebase / HMAC Session Tokens).
 
-Este repositório contém a versão auditada, remediada e instrumentada da aplicação na branch `fix/security-and-hardening`, contemplando:
+Este repositório consolida a versão completamente auditada, remediada e instrumentada da aplicação:
 - **AppSec (OWASP Top 10:2021)**: Remediação completa de 9 vulnerabilidades (`PT-001` a `PT-009`), incluindo Injeção de SQL, Credenciais Hardcoded, RCE/Debug Werkzeug, Quebra de Controle de Acesso (BOLA/IDOR e endpoints não autenticados), Tokens em Query String, Path Traversal, Criptografia Fraca (`scrypt` + HMAC-SHA256), Prompt Injection, CVEs de dependências NPM e ausência de Headers HTTP / Rate Limiting.
 - **SRE & Resiliência**: Instrumentação OpenMetrics/Prometheus (`/metrics` com histogramas de latência), Logs Estruturados em JSON com `request_id` e `actor_uid`, **Circuit Breaker** (`CLOSED`/`OPEN`/`HALF_OPEN`) + **Retry com Backoff Exponencial e Jitter**, Healthcheck ativo (`/health`), **Docker Compose** com Nginx Load Balancer (2 réplicas Gunicorn não-root) e **Manifestos Kubernetes (`k8s/manifests.yaml`)** com HPA, NetworkPolicy e Probes.
 
@@ -154,17 +172,17 @@ uvx pip-audit -r backend/requirements.txt
    curl -i "http://localhost/courses/semester/'%20OR%201=1--"
    # Retorna HTTP 404 (payload tratado como literal via prepared statements `?`)
    ```
-2. **Controle de Acesso / BOLA em Cursos (`PT-005`)**:
+2. **Controle de Acesso / BOLA em Cursos (`PT-002`)**:
    - Criar curso como `user_alice` (`POST /courses`) e tentar atualizar (`PUT /courses/<id>`) com token de `user_bob`:
    - Retorna **`HTTP 403 Forbidden`** (`"Forbidden: only the course creator can modify this course."`).
-3. **Bloqueio de Força Bruta / Rate Limiting (`PT-009`)**:
-   - Enviar 5 requisições `POST /users/login` com senha incorreta seguidas de uma 6ª tentativa:
-   - Retorna **`HTTP 429 Too Many Requests`** com cabeçalho `Retry-After`.
-4. **Rejeição de Token em Query Parameter (`PT-006`)**:
+3. **Rejeição de Token em Query Parameter (`PT-005`)**:
    ```bash
    curl -i "http://localhost/users/info?id_token=ey..."
    # Retorna HTTP 401 Unauthorized
    ```
+4. **Bloqueio de Força Bruta / Rate Limiting (`PT-008`)**:
+   - Enviar 5 requisições `POST /users/login` com senha incorreta seguidas de uma 6ª tentativa:
+   - Retorna **`HTTP 429 Too Many Requests`** com cabeçalho `Retry-After`.
 
 ---
 
